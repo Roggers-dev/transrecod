@@ -316,27 +316,38 @@ def check_subscription():
 
 
 # ---------------------------------------------------------
-# MANAGER DASHBOARD
+# UNIFIED DASHBOARD (WORKSPACE + ADMIN PRIVILEGES)
 # ---------------------------------------------------------
-def render_collector_dashboard():
+def render_dashboard():
   user = st.session_state.user
-  st.sidebar.title(f"👤 {user['full_name']}")
-  st.sidebar.markdown("Workspace Manager")
+  is_admin = user["role"] == "admin"
 
-  nav = st.sidebar.radio(
-      "Navigation",
-      [
-          "📥 Take Transaction Input",
-          "📊 Clients Progress Score",
-          "🎯 Target Limits",
-      ],
-  )
+  if is_admin:
+    st.sidebar.title(f"🛡️ Admin: {user['full_name']}")
+    nav_options = [
+        "📥 Take Transaction Input",
+        "📊 Clients Progress Score",
+        "🎯 Target Limits",
+        "🛡️ [Admin] Manage Managers & Freeze",
+        "💳 [Admin] Subscriptions & MoMo Verification",
+    ]
+  else:
+    st.sidebar.title(f"👤 {user['full_name']}")
+    st.sidebar.markdown("Workspace Manager")
+    nav_options = [
+        "📥 Take Transaction Input",
+        "📊 Clients Progress Score",
+        "🎯 Target Limits",
+    ]
+
+  nav = st.sidebar.radio("Navigation", nav_options)
 
   if st.sidebar.button("Log Out"):
     st.session_state.logged_in = False
     st.session_state.user = None
     st.rerun()
 
+  # --- SECTION 1: TRANSACTION INPUT ---
   if nav == "📥 Take Transaction Input":
     st.subheader("📥 Record Daily Susu Deposit / Withdrawal")
 
@@ -391,6 +402,7 @@ def render_collector_dashboard():
             unsafe_allow_html=True,
         )
 
+  # --- SECTION 2: CLIENTS PROGRESS SCORE ---
   elif nav == "📊 Clients Progress Score":
     st.subheader("📊 Clients Progress Score Comparison")
     df_trans = pd.read_sql(
@@ -406,6 +418,7 @@ def render_collector_dashboard():
     else:
       st.info("No transaction data available yet.")
 
+  # --- SECTION 3: TARGET LIMITS ---
   elif nav == "🎯 Target Limits":
     st.subheader("🎯 Target Limits & Collection Goals")
     st.metric(label="Monthly Collection Target", value="GHS 10,000.00")
@@ -422,28 +435,11 @@ def render_collector_dashboard():
         text=f"Progress: GHS {collected:.2f} / GHS 10,000.00",
     )
 
-
-# ---------------------------------------------------------
-# ADMIN DASHBOARD
-# ---------------------------------------------------------
-def render_admin_dashboard():
-  user = st.session_state.user
-  st.sidebar.title(f"🛡️ Admin: {user['full_name']}")
-
-  admin_nav = st.sidebar.radio(
-      "Admin Panel",
-      [
-          "👥 Manage Managers & Freeze",
-          "💳 Subscriptions & MoMo Verification",
-      ],
-  )
-
-  if st.sidebar.button("Log Out"):
-    st.session_state.logged_in = False
-    st.session_state.user = None
-    st.rerun()
-
-  if admin_nav == "👥 Manage Managers & Freeze":
+  # --- SECTION 4: ADMIN - MANAGE MANAGERS & FREEZE ---
+  elif nav == "🛡️ [Admin] Manage Managers & Freeze":
+    if not is_admin:
+      st.error("Unauthorized access.")
+      return
     st.subheader("Workspace Manager Account Governance")
     df_users = pd.read_sql(
         sqlalchemy.text(
@@ -484,7 +480,11 @@ def render_admin_dashboard():
     else:
       st.info("No registered managers found.")
 
-  elif admin_nav == "💳 Subscriptions & MoMo Verification":
+  # --- SECTION 5: ADMIN - SUBSCRIPTIONS & MOMO VERIFICATION ---
+  elif nav == "💳 [Admin] Subscriptions & MoMo Verification":
+    if not is_admin:
+      st.error("Unauthorized access.")
+      return
     st.subheader("MoMo Payment Verifications (Koffi Rogers - 0542470810)")
     df_subs = pd.read_sql(
         sqlalchemy.text(
@@ -529,8 +529,4 @@ if not st.session_state.logged_in:
   render_auth()
 else:
   check_subscription()
-  current_user = st.session_state.user
-  if current_user["role"] == "admin":
-    render_admin_dashboard()
-  else:
-    render_collector_dashboard()
+  render_dashboard()
