@@ -60,7 +60,7 @@ st.markdown(
 # ==========================================
 def get_db_connection():
   database_url = st.secrets["postgres"]["url"]
-  return psycopg2.connect(database_url, sslmode="require")
+  return psycopg2.connect(database_url)
 
 
 def get_sqlalchemy_engine():
