@@ -1,8 +1,5 @@
 streamlit
 pandas
-numpy
-plotly
-openpyxl
 psycopg2-binary
 sqlalchemy
-pyscopg[binary]
+
