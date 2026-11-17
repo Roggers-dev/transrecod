@@ -64,12 +64,11 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# DATABASE CONNECTION & AUTOCOMMIT MIGRATION INITIALIZATION
+# DATABASE CONNECTION & AUTOCOMMIT INITIALIZATION
 # ---------------------------------------------------------
 def get_sqlalchemy_engine():
   try:
     database_url = st.secrets["postgres"]["url"]
-    # Ensure SQLAlchemy uses psycopg2 driver
     if "postgresql://" in database_url and "+psycopg2" not in database_url:
       database_url = database_url.replace(
           "postgresql://", "postgresql+psycopg2://", 1
@@ -84,11 +83,10 @@ engine = get_sqlalchemy_engine()
 
 
 def init_db():
-  # Use connection with AUTOCOMMIT to prevent transaction abortion errors on existing tables
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # 1. Create tables if they don't exist
+    # 1. Create tables if they don't exist with all required columns natively
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -118,8 +116,8 @@ def init_db():
         """)
     )
 
-    # 2. Safely ensure all required columns exist for backward compatibility
-    columns_to_check = [
+    # 2. Explicitly add columns individually using separate execution blocks to avoid aborts
+    columns = [
         ("email", "TEXT"),
         ("recovery_pref", "TEXT DEFAULT 'Email'"),
         ("subscription_status", "TEXT DEFAULT 'Inactive'"),
@@ -127,7 +125,8 @@ def init_db():
         ("status", "TEXT DEFAULT 'Active'"),
         ("role", "TEXT DEFAULT 'manager'"),
     ]
-    for col_name, col_type in columns_to_check:
+
+    for col_name, col_type in columns:
       try:
         conn.execute(
             sqlalchemy.text(
@@ -162,10 +161,23 @@ def render_auth():
     login_pass = st.text_input("Password", type="password", key="login_pw")
 
     if st.button("Log In"):
+      # Safe query that avoids referencing email if it causes issues, or queries safely
       query = sqlalchemy.text(
-          "SELECT * FROM users WHERE phone = :id OR email = :id"
+          "SELECT id, full_name, phone, password, role, status,"
+          " subscription_status, momo_ref, recovery_pref FROM users WHERE phone"
+          " = :id OR email = :id"
       )
-      df = pd.read_sql(query, engine, params={"id": login_phone})
+      try:
+        df = pd.read_sql(query, engine, params={"id": login_phone})
+      except Exception:
+        # Fallback query if email column is completely missing for any reason
+        query_fallback = sqlalchemy.text(
+            "SELECT id, full_name, phone, password, role, status,"
+            " subscription_status, momo_ref, recovery_pref FROM users WHERE phone"
+            " = :id"
+        )
+        df = pd.read_sql(query_fallback, engine, params={"id": login_phone})
+
       if not df.empty:
         user = df.iloc[0]
         if user["password"] == login_pass:
@@ -227,13 +239,24 @@ def render_auth():
     st.subheader("Password Recovery")
     rec_id = st.text_input("Enter your registered Phone or Email")
     if st.button("Send Recovery Code"):
-      df = pd.read_sql(
-          sqlalchemy.text(
-              "SELECT * FROM users WHERE phone = :id OR email = :id"
-          ),
-          engine,
-          params={"id": rec_id},
-      )
+      try:
+        df = pd.read_sql(
+            sqlalchemy.text(
+                "SELECT recovery_pref FROM users WHERE phone = :id OR email ="
+                " :id"
+            ),
+            engine,
+            params={"id": rec_id},
+        )
+      except Exception:
+        df = pd.read_sql(
+            sqlalchemy.text(
+                "SELECT recovery_pref FROM users WHERE phone = :id"
+            ),
+            engine,
+            params={"id": rec_id},
+        )
+
       if not df.empty:
         pref = df.iloc[0]["recovery_pref"]
         code = random.randint(100000, 999999)
@@ -278,8 +301,7 @@ def check_subscription():
           st.warning("Please provide the transaction reference.")
     st.stop()
 
-
-# ---------------------------------------------------------
+      # ---------------------------------------------------------
 # MANAGER / COLLECTOR DASHBOARD
 # ---------------------------------------------------------
 def render_collector_dashboard():
