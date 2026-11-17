@@ -65,6 +65,11 @@ def get_db_connection():
 
 def get_sqlalchemy_engine():
   database_url = st.secrets["postgres"]["url"]
+  # Automatically force SQLAlchemy to use psycopg2
+  if "postgresql://" in database_url and "+psycopg2" not in database_url:
+    database_url = database_url.replace(
+        "postgresql://", "postgresql+psycopg2://", 1
+    )
   return sqlalchemy.create_engine(database_url)
 
 
