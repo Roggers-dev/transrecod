@@ -1,4 +1,3 @@
-import os
 import random
 import pandas as pd
 import sqlalchemy
@@ -65,7 +64,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# DATABASE CONNECTION & INITIALIZATION
+# DATABASE CONNECTION & MIGRATION-AWARE INITIALIZATION
 # ---------------------------------------------------------
 def get_sqlalchemy_engine():
   try:
@@ -86,6 +85,7 @@ engine = get_sqlalchemy_engine()
 
 def init_db():
   with engine.begin() as conn:
+    # 1. Create tables if they don't exist
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -114,6 +114,25 @@ def init_db():
             )
         """)
     )
+
+    # 2. Ensure all required columns exist for backward compatibility
+    columns_to_check = [
+        ("email", "TEXT"),
+        ("recovery_pref", "TEXT DEFAULT 'Email'"),
+        ("subscription_status", "TEXT DEFAULT 'Inactive'"),
+        ("momo_ref", "TEXT"),
+        ("status", "TEXT DEFAULT 'Active'"),
+    ]
+    for col_name, col_type in columns_to_check:
+      try:
+        conn.execute(
+            sqlalchemy.text(
+                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name}"
+                f" {col_type};"
+            )
+        )
+      except Exception:
+        pass
 
 
 init_db()
@@ -460,7 +479,7 @@ def render_admin_dashboard():
       st.info("No pending subscription verification requests.")
 
 
-        # ---------------------------------------------------------
+# ---------------------------------------------------------
 # MAIN APP ROUTER
 # ---------------------------------------------------------
 if not st.session_state.logged_in:
