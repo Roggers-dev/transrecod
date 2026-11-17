@@ -64,7 +64,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# DATABASE CONNECTION & AUTOCOMMIT INITIALIZATION
+# DATABASE CONNECTION & FRESH INITIALIZATION
 # ---------------------------------------------------------
 def get_sqlalchemy_engine():
   try:
@@ -86,10 +86,13 @@ def init_db():
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # 1. Create tables if they don't exist with all required columns natively
+    # Drop old mismatched tables and recreate them completely fresh with all columns
+    conn.execute(sqlalchemy.text("DROP TABLE IF EXISTS transactions CASCADE;"))
+    conn.execute(sqlalchemy.text("DROP TABLE IF EXISTS users CASCADE;"))
+
     conn.execute(
         sqlalchemy.text("""
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE users (
                 id SERIAL PRIMARY KEY,
                 full_name TEXT NOT NULL,
                 phone TEXT UNIQUE NOT NULL,
@@ -105,7 +108,7 @@ def init_db():
     )
     conn.execute(
         sqlalchemy.text("""
-            CREATE TABLE IF NOT EXISTS transactions (
+            CREATE TABLE transactions (
                 id SERIAL PRIMARY KEY,
                 collector_name TEXT,
                 client_name TEXT,
@@ -115,27 +118,6 @@ def init_db():
             )
         """)
     )
-
-    # 2. Explicitly add columns individually using separate execution blocks to avoid aborts
-    columns = [
-        ("email", "TEXT"),
-        ("recovery_pref", "TEXT DEFAULT 'Email'"),
-        ("subscription_status", "TEXT DEFAULT 'Inactive'"),
-        ("momo_ref", "TEXT"),
-        ("status", "TEXT DEFAULT 'Active'"),
-        ("role", "TEXT DEFAULT 'manager'"),
-    ]
-
-    for col_name, col_type in columns:
-      try:
-        conn.execute(
-            sqlalchemy.text(
-                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name}"
-                f" {col_type};"
-            )
-        )
-      except Exception:
-        pass
 
 
 init_db()
@@ -161,22 +143,12 @@ def render_auth():
     login_pass = st.text_input("Password", type="password", key="login_pw")
 
     if st.button("Log In"):
-      # Safe query that avoids referencing email if it causes issues, or queries safely
       query = sqlalchemy.text(
           "SELECT id, full_name, phone, password, role, status,"
           " subscription_status, momo_ref, recovery_pref FROM users WHERE phone"
           " = :id OR email = :id"
       )
-      try:
-        df = pd.read_sql(query, engine, params={"id": login_phone})
-      except Exception:
-        # Fallback query if email column is completely missing for any reason
-        query_fallback = sqlalchemy.text(
-            "SELECT id, full_name, phone, password, role, status,"
-            " subscription_status, momo_ref, recovery_pref FROM users WHERE phone"
-            " = :id"
-        )
-        df = pd.read_sql(query_fallback, engine, params={"id": login_phone})
+      df = pd.read_sql(query, engine, params={"id": login_phone})
 
       if not df.empty:
         user = df.iloc[0]
@@ -239,23 +211,14 @@ def render_auth():
     st.subheader("Password Recovery")
     rec_id = st.text_input("Enter your registered Phone or Email")
     if st.button("Send Recovery Code"):
-      try:
-        df = pd.read_sql(
-            sqlalchemy.text(
-                "SELECT recovery_pref FROM users WHERE phone = :id OR email ="
-                " :id"
-            ),
-            engine,
-            params={"id": rec_id},
-        )
-      except Exception:
-        df = pd.read_sql(
-            sqlalchemy.text(
-                "SELECT recovery_pref FROM users WHERE phone = :id"
-            ),
-            engine,
-            params={"id": rec_id},
-        )
+      df = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT recovery_pref FROM users WHERE phone = :id OR email ="
+              " :id"
+          ),
+          engine,
+          params={"id": rec_id},
+      )
 
       if not df.empty:
         pref = df.iloc[0]["recovery_pref"]
@@ -301,7 +264,8 @@ def check_subscription():
           st.warning("Please provide the transaction reference.")
     st.stop()
 
-      # ---------------------------------------------------------
+
+# ---------------------------------------------------------
 # MANAGER / COLLECTOR DASHBOARD
 # ---------------------------------------------------------
 def render_collector_dashboard():
