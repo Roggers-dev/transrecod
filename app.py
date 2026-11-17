@@ -94,7 +94,7 @@ def init_db():
                 phone TEXT UNIQUE NOT NULL,
                 email TEXT,
                 password TEXT NOT NULL,
-                role TEXT DEFAULT 'collector',
+                role TEXT DEFAULT 'manager',
                 status TEXT DEFAULT 'Active',
                 recovery_pref TEXT DEFAULT 'Email',
                 subscription_status TEXT DEFAULT 'Inactive',
@@ -122,6 +122,7 @@ def init_db():
         ("subscription_status", "TEXT DEFAULT 'Inactive'"),
         ("momo_ref", "TEXT"),
         ("status", "TEXT DEFAULT 'Active'"),
+        ("role", "TEXT DEFAULT 'manager'"),
     ]
     for col_name, col_type in columns_to_check:
       try:
@@ -149,7 +150,7 @@ if "logged_in" not in st.session_state:
 def render_auth():
   st.title("💰 SusuFlow Enterprise")
   tab1, tab2, tab3 = st.tabs(
-      ["Login", "Register (Full Name)", "Password Recovery"]
+      ["Login", "Register Workspace", "Password Recovery"]
   )
 
   with tab1:
@@ -181,12 +182,11 @@ def render_auth():
         st.error("User not found.")
 
   with tab2:
-    st.subheader("Create New Account")
+    st.subheader("Create Workspace Account")
     reg_name = st.text_input("Full Name (e.g., Kofi Mensah)")
     reg_phone = st.text_input("Phone Number")
     reg_email = st.text_input("Email Address (Optional)")
     reg_pass = st.text_input("Create Password", type="password")
-    reg_role = st.selectbox("Account Role", ["collector", "admin"])
     recovery_choice = st.radio(
         "Preferred Password Recovery Channel:",
         ["Email", "Phone (SMS/WhatsApp)"],
@@ -196,22 +196,23 @@ def render_auth():
       if reg_name and reg_phone and reg_pass:
         try:
           with engine.begin() as conn:
+            # Everyone signing up becomes a 'manager' of their workspace by default (no admin privileges)
             conn.execute(
                 sqlalchemy.text("""
                             INSERT INTO users (full_name, phone, email, password, role, recovery_pref)
-                            VALUES (:name, :phone, :email, :passwd, :role, :rec)
+                            VALUES (:name, :phone, :email, :passwd, 'manager', :rec)
                         """),
                 {
                     "name": reg_name,
                     "phone": reg_phone,
                     "email": reg_email,
                     "passwd": reg_pass,
-                    "role": reg_role,
                     "rec": recovery_choice,
                 },
             )
           st.success(
-              "Registration successful! You can now log in using the Login tab."
+              "Registration successful! You are now the workspace manager. You"
+              " can log in using the Login tab."
           )
         except Exception as e:
           st.error(
@@ -277,12 +278,12 @@ def check_subscription():
 
 
 # ---------------------------------------------------------
-# COLLECTOR DASHBOARD
+# MANAGER / COLLECTOR DASHBOARD
 # ---------------------------------------------------------
 def render_collector_dashboard():
   user = st.session_state.user
   st.sidebar.title(f"👤 {user['full_name']}")
-  st.sidebar.markdown("Storage: **Cloud PostgreSQL (Neon)**")
+  st.sidebar.markdown("Workspace Manager")
 
   nav = st.sidebar.radio(
       "Navigation",
@@ -332,7 +333,7 @@ def render_collector_dashboard():
                     <hr style="border: 0.5px dashed #ccc;">
                     <p><b>Date:</b> {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}</p>
                     <p><b>Client:</b> {client_name}</p>
-                    <p><b>Collector:</b> {user['full_name']}</p>
+                    <p><b>Manager/Collector:</b> {user['full_name']}</p>
                     <p><b>Type:</b> {trans_type}</p>
                     <p><b>Amount:</b> GHS {amount:.2f}</p>
                     <hr style="border: 0.5px dashed #ccc;">
@@ -405,7 +406,7 @@ def render_admin_dashboard():
     st.rerun()
 
   if admin_nav == "👥 Manage Collectors & Freeze":
-    st.subheader("Collector Account Governance")
+    st.subheader("Workspace Manager / Collector Account Governance")
     df_users = pd.read_sql(
         sqlalchemy.text(
             "SELECT id, full_name, phone, role, status FROM users"
