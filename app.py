@@ -64,7 +64,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# DATABASE CONNECTION & MIGRATION-AWARE INITIALIZATION
+# DATABASE CONNECTION & AUTOCOMMIT MIGRATION INITIALIZATION
 # ---------------------------------------------------------
 def get_sqlalchemy_engine():
   try:
@@ -84,7 +84,10 @@ engine = get_sqlalchemy_engine()
 
 
 def init_db():
-  with engine.begin() as conn:
+  # Use connection with AUTOCOMMIT to prevent transaction abortion errors on existing tables
+  with engine.connect() as conn:
+    conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+
     # 1. Create tables if they don't exist
     conn.execute(
         sqlalchemy.text("""
@@ -115,7 +118,7 @@ def init_db():
         """)
     )
 
-    # 2. Ensure all required columns exist for backward compatibility
+    # 2. Safely ensure all required columns exist for backward compatibility
     columns_to_check = [
         ("email", "TEXT"),
         ("recovery_pref", "TEXT DEFAULT 'Email'"),
@@ -196,7 +199,6 @@ def render_auth():
       if reg_name and reg_phone and reg_pass:
         try:
           with engine.begin() as conn:
-            # Everyone signing up becomes a 'manager' of their workspace by default (no admin privileges)
             conn.execute(
                 sqlalchemy.text("""
                             INSERT INTO users (full_name, phone, email, password, role, recovery_pref)
