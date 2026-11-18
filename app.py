@@ -1,3 +1,4 @@
+import uuid
 import pandas as pd
 import sqlalchemy
 import streamlit as st
@@ -12,27 +13,27 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for Visible Developer Header, Mobile Performance, and Print Receipts
+# Custom CSS for Bottom-Left Developer Footer, Mobile Performance, and Print Receipts
 st.markdown(
     """
     <style>
-    /* Always Visible Top-Right Developer Header Styling */
-    .developer-header {
+    /* Fixed Bottom-Left Developer Header/Footer Styling */
+    .developer-footer {
         position: fixed;
-        top: 10px;
-        right: 20px;
+        bottom: 15px;
+        left: 15px;
         background: linear-gradient(135deg, #FF4B4B, #FF914D);
         color: white;
         padding: 10px 15px;
         border-radius: 8px;
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         font-size: 11px;
-        text-align: right;
-        box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        text-align: left;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.3);
         z-index: 99999;
         line-height: 1.3;
     }
-    .developer-header strong {
+    .developer-footer strong {
         font-size: 12px;
         letter-spacing: 0.5px;
     }
@@ -79,7 +80,7 @@ st.markdown(
     }
     </style>
 
-    <div class="developer-header">
+    <div class="developer-footer">
         <strong>🚀 AlufaTanaah Record Keeper</strong><br>
         Developer: Rogers enterprises limited<br>
         📧 koffieroggers@gmail.com | Enchi
@@ -131,11 +132,11 @@ def init_db():
         """)
     )
 
-    # Clients Table
+    # Clients Table with Unique UUID Primary Key
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS clients (
-                id SERIAL PRIMARY KEY,
+                id TEXT PRIMARY KEY,
                 manager_name TEXT,
                 client_name TEXT NOT NULL,
                 client_phone TEXT,
@@ -175,7 +176,7 @@ def init_db():
         """)
     )
 
-    # Ensure Columns Exist for Existing Databases
+    # Ensure All Required Columns Exist in Existing Databases
     columns_users = [
         ("client_quota", "INT DEFAULT 50"),
         ("edit_override", "BOOLEAN DEFAULT FALSE"),
@@ -380,7 +381,9 @@ def render_auth():
           st.error("Passwords do not match.")
       else:
         st.warning("Please fill out all fields.")
-        # ---------------------------------------------------------
+
+
+# ---------------------------------------------------------
 # MAIN DASHBOARD (WORKSPACE + ADMIN PRIVILEGES)
 # ---------------------------------------------------------
 def render_dashboard():
@@ -445,36 +448,36 @@ def render_dashboard():
       c_phone = st.text_input("Client Phone Number")
       c_gender = st.selectbox("Gender", ["Male", "Female", "Other"])
       c_location = st.text_input("Location / Address")
-      c_target = st.number_input(
-          "Initial Target Limit (GHS)", min_value=0.0, step=10.0
-      )
 
       submitted = st.form_submit_button("Register Client")
       if submitted and c_name:
         try:
+          unique_client_id = f"CLI-{str(uuid.uuid4()).upper()[:8]}"
           with engine.begin() as conn:
             conn.execute(
                 sqlalchemy.text("""
-                            INSERT INTO clients (manager_name, client_name, client_phone, gender, location, target_limit)
-                            VALUES (:m, :name, :phone, :gender, :location, :target)
+                            INSERT INTO clients (id, manager_name, client_name, client_phone, gender, location)
+                            VALUES (:id, :m, :name, :phone, :gender, :location)
                         """),
                 {
+                    "id": unique_client_id,
                     "m": user["full_name"],
                     "name": c_name,
                     "phone": c_phone,
                     "gender": c_gender,
                     "location": c_location,
-                    "target": c_target,
                 },
             )
           st.success(
-              f"Client **{c_name}** successfully registered in your workspace!"
+              f"Client **{c_name}** successfully registered with Unique ID:"
+              f" `{unique_client_id}`!"
           )
           st.rerun()
         except Exception as e:
           st.error(f"Error registering client: {e}")
 
-  # --- SECTION 2: RECORD TRANSACTION & RECEIPT ---
+
+            # --- SECTION 2: RECORD TRANSACTION & RECEIPT ---
   elif nav == "📥 Record Transaction & Receipts":
     st.subheader("📥 Record Daily Transaction & Generate PDF/Print Receipt")
 
@@ -578,7 +581,7 @@ def render_dashboard():
       )
 
     search_query = st.text_input(
-        "🔎 Search customers by name, phone, or location:"
+        "🔎 Search customers by name, phone, location, or Unique ID:"
     )
     if search_query:
       mask = (
@@ -587,6 +590,8 @@ def render_dashboard():
           | df_clients_all["client_phone"]
           .str.contains(search_query, case=False, na=False)
           | df_clients_all["location"]
+          .str.contains(search_query, case=False, na=False)
+          | df_clients_all["id"]
           .str.contains(search_query, case=False, na=False)
       )
       df_clients_filtered = df_clients_all[mask]
@@ -718,28 +723,31 @@ def render_dashboard():
     if not df_clients.empty:
       st.dataframe(df_clients, use_container_width=True)
 
-      c_id = st.number_input(
-          "Enter Client ID to Update Target Limit", min_value=1, step=1
+      c_id_input = st.text_input(
+          "Enter Client Unique ID to Update Target Limit (e.g., CLI-XXXXXX)"
       )
-      target_row = df_clients[df_clients["id"] == c_id]
-      if not target_row.empty:
-        tr = target_row.iloc[0]
-        with st.form("target_form"):
-          new_target = st.number_input(
-              f"Set New Target Limit for {tr['client_name']} (GHS)",
-              value=float(tr["target_limit"]),
-              step=10.0,
-          )
-          if st.form_submit_button("Update Target Limit"):
-            with engine.begin() as conn:
-              conn.execute(
-                  sqlalchemy.text(
-                      "UPDATE clients SET target_limit = :t WHERE id = :id"
-                  ),
-                  {"t": new_target, "id": c_id},
-              )
-            st.success("Target limit updated successfully!")
-            st.rerun()
+      if c_id_input:
+        target_row = df_clients[df_clients["id"] == c_id_input]
+        if not target_row.empty:
+          tr = target_row.iloc[0]
+          with st.form("target_form"):
+            new_target = st.number_input(
+                f"Set New Target Limit for {tr['client_name']} (GHS)",
+                value=float(tr["target_limit"]),
+                step=10.0,
+            )
+            if st.form_submit_button("Update Target Limit"):
+              with engine.begin() as conn:
+                conn.execute(
+                    sqlalchemy.text(
+                        "UPDATE clients SET target_limit = :t WHERE id = :id"
+                    ),
+                    {"t": new_target, "id": c_id_input},
+                )
+              st.success("Target limit updated successfully!")
+              st.rerun()
+        else:
+          st.error("Client Unique ID not found.")
     else:
       st.info("No clients available to set target limits.")
 
@@ -907,8 +915,8 @@ def render_dashboard():
     st.subheader("📋 All Registered Clients Across All Workspaces")
     df_all_clients = pd.read_sql(
         sqlalchemy.text(
-            "SELECT client_name, client_phone, gender, location, manager_name,"
-            " target_limit, date_registered FROM clients"
+            "SELECT id, client_name, client_phone, gender, location,"
+            " manager_name, target_limit, date_registered FROM clients"
         ),
         engine,
     )
@@ -944,5 +952,3 @@ if not st.session_state.logged_in:
   render_auth()
 else:
   render_dashboard()
-
-   
