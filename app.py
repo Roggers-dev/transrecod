@@ -104,13 +104,14 @@ def create_receipt_pdf(
     date_str,
     client_name,
     client_id,
+    payer_name,
     manager_name,
     company_header,
     trans_type,
     amount,
     notes,
 ):
-  pdf = FPDF(orientation="P", unit="mm", format=(105, 160))
+  pdf = FPDF(orientation="P", unit="mm", format=(105, 165))
   pdf.set_auto_page_break(auto=False)
   pdf.add_page()
 
@@ -125,9 +126,9 @@ def create_receipt_pdf(
   pdf.cell(95, 5, "OFFICIAL TRANSACTION RECEIPT", ln=True, align="C")
 
   pdf.set_fill_color(44, 62, 80)
-  pdf.rect(0, 138, 105, 22, "F")
+  pdf.rect(0, 142, 105, 23, "F")
   pdf.set_text_color(255, 255, 255)
-  pdf.set_xy(5, 141)
+  pdf.set_xy(5, 145)
   pdf.set_font("Helvetica", "I", 8)
   pdf.cell(95, 4, "Thank you for working with us.", ln=True, align="C")
   pdf.set_font("Helvetica", "B", 7)
@@ -142,34 +143,35 @@ def create_receipt_pdf(
   )
 
   pdf.set_text_color(20, 20, 20)
-  pdf.set_xy(8, 30)
+  pdf.set_xy(8, 28)
   pdf.set_font("Helvetica", "B", 9)
-  pdf.cell(40, 6, "Receipt No:", 0, 0)
+  pdf.cell(40, 5, "Receipt No:", 0, 0)
   pdf.set_font("Helvetica", "", 9)
-  pdf.cell(49, 6, str(receipt_no), 0, 1, "R")
+  pdf.cell(49, 5, str(receipt_no), 0, 1, "R")
 
   pdf.set_x(8)
   pdf.set_font("Helvetica", "B", 9)
-  pdf.cell(40, 6, "Date & Time:", 0, 0)
+  pdf.cell(40, 5, "Date & Time:", 0, 0)
   pdf.set_font("Helvetica", "", 9)
-  pdf.cell(49, 6, str(date_str), 0, 1, "R")
+  pdf.cell(49, 5, str(date_str), 0, 1, "R")
 
   pdf.line(8, pdf.get_y() + 2, 97, pdf.get_y() + 2)
-  pdf.ln(4)
+  pdf.ln(3)
 
   details = [
       ("Client Name:", str(client_name)),
       ("Client ID:", str(client_id)),
+      ("Paid By / Payer:", str(payer_name)),
       ("Collector/Mgr:", str(manager_name)),
       ("Transaction:", str(trans_type).upper()),
   ]
   for label, val in details:
     pdf.set_x(8)
     pdf.set_font("Helvetica", "B", 9)
-    pdf.cell(35, 6, label, 0, 0)
+    pdf.cell(35, 5, label, 0, 0)
     pdf.set_font("Helvetica", "", 9)
     safe_val = str(val).encode("latin-1", "replace").decode("latin-1")
-    pdf.cell(54, 6, safe_val[:28], 0, 1, "R")
+    pdf.cell(54, 5, safe_val[:28], 0, 1, "R")
 
   pdf.ln(2)
   pdf.set_fill_color(245, 245, 245)
@@ -183,7 +185,7 @@ def create_receipt_pdf(
   pdf.ln(2)
   pdf.set_x(8)
   pdf.set_font("Helvetica", "B", 8)
-  pdf.cell(89, 5, "Remarks / Notes:", 0, 1)
+  pdf.cell(89, 4, "Remarks / Notes:", 0, 1)
   pdf.set_x(8)
   pdf.set_font("Helvetica", "", 8)
   safe_notes = (notes if notes else "None").encode("latin-1", "replace").decode("latin-1")
@@ -266,6 +268,7 @@ def init_db():
                 manager_name TEXT,
                 client_name TEXT,
                 client_id TEXT,
+                payer_name TEXT DEFAULT '',
                 amount FLOAT,
                 trans_type TEXT,
                 notes TEXT,
@@ -288,6 +291,7 @@ def init_db():
     )
 
     schema_migrations = [
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS payer_name TEXT DEFAULT '';",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT DEFAULT '';",
         "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS admin_reply TEXT DEFAULT '';",
         "ALTER TABLE clients ALTER COLUMN id DROP DEFAULT;",
@@ -335,7 +339,6 @@ def init_db():
 
 
 init_db()
-
 
 # ---------------------------------------------------------
 # SESSION STATE
@@ -540,7 +543,7 @@ def render_dashboard():
     st.session_state.last_receipt = None
     st.rerun()
 
-      # 1. REGISTER CLIENT
+  # 1. REGISTER CLIENT
   if nav == "👥 Register Client":
     st.subheader("👥 Register New Client")
     if not is_admin:
@@ -617,8 +620,20 @@ def render_dashboard():
 
     with st.form("trans_form", clear_on_submit=True):
       selected_label = st.selectbox("Select Client", list(client_dict.keys()))
+      
+      # NEW TRANSACTION TYPES REQUESTED
+      trans_type = st.selectbox(
+          "Transaction Type",
+          ["Deposit", "Payment", "Arrears Pay", "Loan Payment"],
+      )
+
       amount = st.number_input("Amount (GHS)", min_value=0.0, step=1.0)
-      trans_type = st.selectbox("Transaction Type", ["Deposit", "Withdrawal"])
+      
+      # PROXY PAYER FIELD
+      payer_name = st.text_input(
+          "Who is making this payment / deposit? (Leave blank if made by client directly)"
+      ).strip()
+
       notes = st.text_area("Notes / Remarks (Locked after 24 hrs)")
 
       submitted = st.form_submit_button("Save Transaction & Generate PDF Receipt")
@@ -632,6 +647,8 @@ def render_dashboard():
               c_data["name"],
               c_data["phone"],
           )
+          
+          final_payer = payer_name if payer_name else c_name
           now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
           current_header = user.get(
               "company_header", "AlufaTanaah Record Keeper"
@@ -640,14 +657,15 @@ def render_dashboard():
             with engine.begin() as conn:
               res = conn.execute(
                   sqlalchemy.text("""
-                              INSERT INTO transactions (manager_name, client_name, client_id, amount, trans_type, notes)
-                              VALUES (:col, :client, :cid, :amt, :type, :notes)
+                              INSERT INTO transactions (manager_name, client_name, client_id, payer_name, amount, trans_type, notes)
+                              VALUES (:col, :client, :cid, :payer, :amt, :type, :notes)
                               RETURNING id
                           """),
                   {
                       "col": user["full_name"],
                       "client": c_name,
                       "cid": str(c_id),
+                      "payer": final_payer,
                       "amt": float(amount),
                       "type": trans_type,
                       "notes": notes,
@@ -661,6 +679,7 @@ def render_dashboard():
                 date_str=now_str,
                 client_name=c_name,
                 client_id=c_id,
+                payer_name=final_payer,
                 manager_name=user["full_name"],
                 company_header=current_header,
                 trans_type=trans_type,
@@ -674,6 +693,7 @@ def render_dashboard():
                 "client_name": c_name,
                 "client_id": c_id,
                 "client_phone": c_phone,
+                "payer_name": final_payer,
                 "manager_name": user["full_name"],
                 "company_header": current_header,
                 "trans_type": trans_type,
@@ -700,6 +720,7 @@ def render_dashboard():
                     <hr style="border: 0.5px dashed #ccc;">
                     <p><b>Client Name:</b> {rec['client_name']}</p>
                     <p><b>Client ID:</b> {rec['client_id']}</p>
+                    <p><b>Paid By:</b> {rec['payer_name']}</p>
                     <p><b>Collector/Mgr:</b> {rec['manager_name']}</p>
                     <p><b>Transaction:</b> {rec['trans_type'].upper()}</p>
                     <p style="background:#f9f9f9; padding:8px; border-radius:4px; margin-top:8px;"><b>TOTAL AMOUNT:</b> GHS {rec['amount']:,.2f}</p>
@@ -726,9 +747,14 @@ def render_dashboard():
       with col_dl2:
         if rec["client_phone"]:
           clean_ph = normalize_ghana_phone(rec["client_phone"])
+
+            # DYNAMIC WHATSAPP PHRASING BASED ON TRANSACTION TYPE & PAYER
+          action_phrase = "payment received" if rec['trans_type'] in ["Payment", "Arrears Pay", "Loan Payment"] else "deposit made"
+          payer_text = f" by {rec['payer_name']}" if rec['payer_name'] != rec['client_name'] else ""
+          
           wa_msg = (
-              f"Hello {rec['client_name']}, your {rec['trans_type'].lower()} of"
-              f" GHS {rec['amount']:,.2f} has been successfully recorded on your"
+              f"Hello {rec['client_name']}, {action_phrase} of"
+              f" GHS {rec['amount']:,.2f} ({rec['trans_type']}){payer_text} has been successfully recorded on your"
               f" account ({rec['client_id']}) on {rec['date_str']}. Receipt No:"
               f" {rec['receipt_no']}. Thank you for working with us. - "
               f"{rec['company_header']}"
@@ -744,8 +770,7 @@ def render_dashboard():
               "⚠️ Client has no phone number recorded for WhatsApp alerts."
           )
 
-
-            # 3. WORKSPACE & RECEIPT SETTINGS
+  # 3. WORKSPACE & RECEIPT SETTINGS
   elif nav == "⚙️ Workspace & Receipt Settings":
     st.subheader("⚙️ Customize Your Receipt Header / Company Name")
     current_h = user.get("company_header", "AlufaTanaah Record Keeper")
@@ -778,7 +803,7 @@ def render_dashboard():
           " location, target_limit, date_registered FROM clients"
       )
       df_trans = safe_read_sql(
-          "SELECT id, manager_name, client_name, amount, trans_type, notes,"
+          "SELECT id, manager_name, client_name, payer_name, amount, trans_type, notes,"
           " date FROM transactions ORDER BY date DESC"
       )
     else:
@@ -789,7 +814,7 @@ def render_dashboard():
           params={"m": user["full_name"]},
       )
       df_trans = safe_read_sql(
-          "SELECT id, manager_name, client_name, amount, trans_type, notes,"
+          "SELECT id, manager_name, client_name, payer_name, amount, trans_type, notes,"
           " date FROM transactions WHERE manager_name = :m ORDER BY date"
           " DESC",
           params={"m": user["full_name"]},
@@ -803,7 +828,7 @@ def render_dashboard():
 
       if not df_trans.empty and "client_name" in df_trans.columns:
         deposits = (
-            df_trans[df_trans["trans_type"] == "Deposit"]
+            df_trans[df_trans["trans_type"].isin(["Deposit", "Payment", "Arrears Pay", "Loan Payment"])]
             .groupby("client_name")["amount"]
             .sum()
             .reset_index(name="Total Deposits (GHS)")
