@@ -7,17 +7,38 @@ import streamlit as st
 # PAGE CONFIGURATION & MOBILE OPTIMIZATION
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="SusuFlow Enterprise",
+    page_title="AlufaTanaah Transaction Record Keeper",
     page_icon="💰",
     layout="centered",
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for Mobile Performance and Print-Isolated Receipts
+# Custom CSS for Branded Header, Mobile Performance, and Print Receipts
 st.markdown(
     """
     <style>
-    /* Hide Streamlit header, footer, and sidebar when printing or saving as PDF */
+    /* Branded Top-Right Developer Header Styling */
+    .developer-header {
+        position: fixed;
+        top: 10px;
+        right: 20px;
+        background: linear-gradient(135deg, #FF4B4B, #FF914D);
+        color: white;
+        padding: 10px 15px;
+        border-radius: 8px;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-size: 11px;
+        text-align: right;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+        z-index: 99999;
+        line-height: 1.3;
+    }
+    .developer-header strong {
+        font-size: 12px;
+        letter-spacing: 0.5px;
+    }
+
+    /* Hide Streamlit header/sidebar elements during printing */
     @media print {
         header, footer, [data-testid="stSidebar"], .stButton, .stTextInput, .stSelectbox {
             display: none !important;
@@ -48,16 +69,22 @@ st.markdown(
     .receipt-title {
         text-align: center;
         font-weight: bold;
-        font-size: 18px;
+        font-size: 16px;
         margin-bottom: 0;
     }
     .receipt-subtitle {
         text-align: center;
-        font-size: 12px;
+        font-size: 11px;
         color: #666;
         margin-bottom: 15px;
     }
     </style>
+
+    <div class="developer-header">
+        <strong>🚀 AlufaTanaah Record Keeper</strong><br>
+        Developer: Rogers enterprises limited<br>
+        📧 koffieroggers@gmail.com | Enchi
+    </div>
     """,
     unsafe_allow_html=True,
 )
@@ -86,7 +113,7 @@ def init_db():
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # 1. Create tables if they don't exist
+    # Users Table
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -98,34 +125,64 @@ def init_db():
                 role TEXT DEFAULT 'manager',
                 status TEXT DEFAULT 'Active',
                 recovery_pref TEXT DEFAULT 'Email',
-                subscription_status TEXT DEFAULT 'Inactive',
-                momo_ref TEXT
+                client_quota INT DEFAULT 50,
+                edit_override BOOLEAN DEFAULT FALSE,
+                note_override BOOLEAN DEFAULT FALSE
             )
         """)
     )
+
+    # Clients Table
+    conn.execute(
+        sqlalchemy.text("""
+            CREATE TABLE IF NOT EXISTS clients (
+                id SERIAL PRIMARY KEY,
+                manager_name TEXT,
+                client_name TEXT NOT NULL,
+                client_phone TEXT,
+                target_limit FLOAT DEFAULT 0.0,
+                date_registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    )
+
+    # Transactions Table
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id SERIAL PRIMARY KEY,
-                collector_name TEXT,
+                manager_name TEXT,
                 client_name TEXT,
                 amount FLOAT,
                 trans_type TEXT,
+                notes TEXT,
                 date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
     )
 
-    # 2. Ensure all columns exist safely
-    columns = [
-        ("email", "TEXT"),
-        ("recovery_pref", "TEXT DEFAULT 'Email'"),
-        ("subscription_status", "TEXT DEFAULT 'Inactive'"),
-        ("momo_ref", "TEXT"),
+    # App Issues / Support Tickets Table
+    conn.execute(
+        sqlalchemy.text("""
+            CREATE TABLE IF NOT EXISTS support_tickets (
+                id SERIAL PRIMARY KEY,
+                manager_name TEXT,
+                issue_message TEXT,
+                status TEXT DEFAULT 'Pending',
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    )
+
+    # Ensure Columns Exist for Existing Databases
+    columns_users = [
+        ("client_quota", "INT DEFAULT 50"),
+        ("edit_override", "BOOLEAN DEFAULT FALSE"),
+        ("note_override", "BOOLEAN DEFAULT FALSE"),
         ("status", "TEXT DEFAULT 'Active'"),
         ("role", "TEXT DEFAULT 'manager'"),
     ]
-    for col_name, col_type in columns:
+    for col_name, col_type in columns_users:
       try:
         conn.execute(
             sqlalchemy.text(
@@ -136,21 +193,22 @@ def init_db():
       except Exception:
         pass
 
-    # 3. Seed default admin account if none exists
+    # Seed Default System Admin Account
     res = conn.execute(
         sqlalchemy.text("SELECT COUNT(*) FROM users WHERE role = 'admin'")
     ).fetchone()
     if res[0] == 0:
       conn.execute(
           sqlalchemy.text("""
-                INSERT INTO users (full_name, phone, email, password, role, status, subscription_status)
-                VALUES ('System Admin', 'admin', 'admin@susuflow.com', 'admin123', 'admin', 'Active', 'Active')
+                INSERT INTO users (full_name, phone, email, password, role, status, client_quota)
+                VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', 'admin123', 'admin', 'Active', 9999)
                 ON CONFLICT (phone) DO NOTHING;
             """)
       )
 
 
 init_db()
+
 
 
 # ---------------------------------------------------------
@@ -162,7 +220,7 @@ if "logged_in" not in st.session_state:
 
 
 def render_auth():
-  st.title("💰 SusuFlow Enterprise")
+  st.title("💰 AlufaTanaah Transaction Record Keeper")
   tab1, tab2, tab3 = st.tabs(
       ["Login", "Register Workspace", "Password Recovery"]
   )
@@ -175,17 +233,17 @@ def render_auth():
     if st.button("Log In"):
       query = sqlalchemy.text(
           "SELECT id, full_name, phone, email, password, role, status,"
-          " subscription_status, momo_ref, recovery_pref FROM users WHERE phone"
-          " = :id OR email = :id"
+          " client_quota, edit_override, note_override, recovery_pref FROM users"
+          " WHERE phone = :id OR email = :id"
       )
       try:
         df = pd.read_sql(query, engine, params={"id": login_phone})
       except Exception:
         df = pd.read_sql(
             sqlalchemy.text(
-                "SELECT id, full_name, phone, password, role, status,"
-                " subscription_status, momo_ref, recovery_pref FROM users WHERE"
-                " phone = :id"
+                "SELECT id, full_name, phone, email, password, role, status,"
+                " client_quota, edit_override, note_override, recovery_pref FROM"
+                " users WHERE phone = :id"
             ),
             engine,
             params={"id": login_phone},
@@ -196,8 +254,8 @@ def render_auth():
         if user["password"] == login_pass:
           if user["status"] == "Frozen":
             st.error(
-                "⚠️ Your account has been frozen by the admin. Contact"
-                " management."
+                "⚠️ Your account has been frozen by administration for audit."
+                " Contact support."
             )
           else:
             st.session_state.logged_in = True
@@ -226,8 +284,8 @@ def render_auth():
           with engine.begin() as conn:
             conn.execute(
                 sqlalchemy.text("""
-                            INSERT INTO users (full_name, phone, email, password, role, recovery_pref)
-                            VALUES (:name, :phone, :email, :passwd, 'manager', :rec)
+                            INSERT INTO users (full_name, phone, email, password, role, recovery_pref, client_quota)
+                            VALUES (:name, :phone, :email, :passwd, 'manager', :rec, 50)
                         """),
                 {
                     "name": reg_name,
@@ -238,8 +296,8 @@ def render_auth():
                 },
             )
           st.success(
-              "Registration successful! You are now the workspace manager. You"
-              " can log in using the Login tab."
+              "Registration successful! You can now log in and immediately"
+              " register clients."
           )
         except Exception as e:
           st.error(
@@ -282,41 +340,7 @@ def render_auth():
 
 
 # ---------------------------------------------------------
-# SUBSCRIPTION GATE FOR FULL ACCESS
-# ---------------------------------------------------------
-def check_subscription():
-  user = st.session_state.user
-  if user["role"] == "admin":
-    return  # Admins bypass subscription check
-
-  if user["subscription_status"] != "Active":
-    st.warning("⚠️ Full Platform Access Requires Active Subscription")
-    st.info(
-        "Please send your subscription fee to the Admin/Developer MoMo Number:"
-        " **0542470810** (Name: **Koffi Rogers**)."
-    )
-
-    with st.form("sub_form"):
-      momo_ref = st.text_input("Enter Mobile Money Transaction Reference ID")
-      if st.form_submit_button("Submit Payment Reference"):
-        if momo_ref:
-          with engine.begin() as conn:
-            conn.execute(
-                sqlalchemy.text(
-                    "UPDATE users SET momo_ref = :ref WHERE id = :uid"
-                ),
-                {"ref": momo_ref, "uid": user["id"]},
-            )
-          st.success(
-              "Reference submitted successfully! Waiting for admin activation."
-          )
-        else:
-          st.warning("Please provide the transaction reference.")
-    st.stop()
-
-
-# ---------------------------------------------------------
-# UNIFIED DASHBOARD (WORKSPACE + ADMIN PRIVILEGES)
+# MAIN DASHBOARD (WORKSPACE + ADMIN PRIVILEGES)
 # ---------------------------------------------------------
 def render_dashboard():
   user = st.session_state.user
@@ -325,19 +349,24 @@ def render_dashboard():
   if is_admin:
     st.sidebar.title(f"🛡️ Admin: {user['full_name']}")
     nav_options = [
-        "📥 Take Transaction Input",
-        "📊 Clients Progress Score",
-        "🎯 Target Limits",
-        "🛡️ [Admin] Manage Managers & Freeze",
-        "💳 [Admin] Subscriptions & MoMo Verification",
+        "👥 Register Client",
+        "📥 Record Transaction & Receipts",
+        "📊 My Clients & Records",
+        "🎯 Client Target Limits",
+        "📥 Export Encrypted Data (Excel/CSV)",
+        "🛡️ [Admin] Manager Governance & Quotas",
+        "🛠️ App Issues & Support Tickets",
     ]
   else:
     st.sidebar.title(f"👤 {user['full_name']}")
     st.sidebar.markdown("Workspace Manager")
     nav_options = [
-        "📥 Take Transaction Input",
-        "📊 Clients Progress Score",
-        "🎯 Target Limits",
+        "👥 Register Client",
+        "📥 Record Transaction & Receipts",
+        "📊 My Clients & Records",
+        "🎯 Client Target Limits",
+        "📥 Export Encrypted Data (Excel/CSV)",
+        "🛠️ Report App Issue / Problem",
     ]
 
   nav = st.sidebar.radio("Navigation", nav_options)
@@ -347,44 +376,120 @@ def render_dashboard():
     st.session_state.user = None
     st.rerun()
 
-  # --- SECTION 1: TRANSACTION INPUT ---
-  if nav == "📥 Take Transaction Input":
-    st.subheader("📥 Record Daily Susu Deposit / Withdrawal")
+  # --- SECTION 1: REGISTER CLIENT ---
+  if nav == "👥 Register Client":
+    st.subheader("👥 Register New Client")
+
+    if not is_admin:
+      df_count = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT COUNT(*) as cnt FROM clients WHERE manager_name = :m"
+          ),
+          engine,
+          params={"m": user["full_name"]},
+      )
+      current_count = df_count.iloc[0]["cnt"]
+      quota = user["client_quota"]
+      st.info(f"Quota Status: **{current_count} / {quota}** clients registered")
+
+      if current_count >= quota:
+        st.error(
+            "⚠️ You have reached your client registration quota limit."
+            " Contact Admin to increase your quota."
+        )
+        return
+
+    with st.form("client_reg_form"):
+      c_name = st.text_input("Client Full Name")
+      c_phone = st.text_input("Client Phone Number")
+      c_target = st.number_input(
+          "Initial Target Limit (GHS)", min_value=0.0, step=10.0
+      )
+
+      submitted = st.form_submit_button("Register Client")
+      if submitted and c_name:
+        try:
+          with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text("""
+                            INSERT INTO clients (manager_name, client_name, client_phone, target_limit)
+                            VALUES (:m, :name, :phone, :target)
+                        """),
+                {
+                    "m": user["full_name"],
+                    "name": c_name,
+                    "phone": c_phone,
+                    "target": c_target,
+                },
+            )
+          st.success(
+              f"Client **{c_name}** successfully registered in your workspace!"
+          )
+        except Exception as e:
+          st.error(f"Error registering client: {e}")
+
+  # --- SECTION 2: RECORD TRANSACTION & RECEIPT ---
+  elif nav == "📥 Record Transaction & Receipts":
+    st.subheader("📥 Record Daily Transaction & Generate PDF/Print Receipt")
+
+    if is_admin:
+      df_clients = pd.read_sql(
+          sqlalchemy.text("SELECT client_name FROM clients"), engine
+      )
+    else:
+      df_clients = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT client_name FROM clients WHERE manager_name = :m"
+          ),
+          engine,
+          params={"m": user["full_name"]},
+      )
+
+    client_list = (
+        df_clients["client_name"].tolist() if not df_clients.empty else []
+    )
+
+    if not client_list:
+      st.warning(
+          "⚠️ Please register at least one client using 'Register Client' first."
+      )
+      return
 
     with st.form("trans_form"):
-      client_name = st.text_input("Client Full Name")
+      client_name = st.selectbox("Select Client", client_list)
       amount = st.number_input("Amount (GHS)", min_value=0.0, step=1.0)
       trans_type = st.selectbox("Transaction Type", ["Deposit", "Withdrawal"])
+      notes = st.text_area("Notes / Remarks (Locked after 24 hrs)")
 
-      submitted = st.form_submit_button("Save & Generate Receipt")
-      if submitted and client_name and amount > 0:
+      submitted = st.form_submit_button("Save Transaction & Generate Receipt")
+      if submitted and amount > 0:
         with engine.begin() as conn:
           conn.execute(
               sqlalchemy.text("""
-                        INSERT INTO transactions (collector_name, client_name, amount, trans_type)
-                        VALUES (:col, :client, :amt, :type)
+                        INSERT INTO transactions (manager_name, client_name, amount, trans_type, notes)
+                        VALUES (:col, :client, :amt, :type, :notes)
                     """),
               {
                   "col": user["full_name"],
                   "client": client_name,
                   "amt": amount,
                   "type": trans_type,
+                  "notes": notes,
               },
           )
         st.success("Transaction recorded successfully!")
 
-        # Display Mobile-Sized Receipt with Print Isolation
-        st.markdown("### Official Transaction Receipt")
         receipt_html = f"""
                 <div class="receipt-container">
-                    <p class="receipt-title">SusuFlow Enterprise</p>
-                    <p class="receipt-subtitle">Mobile Receipt & Record</p>
+                    <p class="receipt-title">AlufaTanaah Record Keeper</p>
+                    <p class="receipt-subtitle">Official Mobile Receipt</p>
                     <hr style="border: 0.5px dashed #ccc;">
                     <p><b>Date:</b> {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}</p>
                     <p><b>Client:</b> {client_name}</p>
                     <p><b>Manager:</b> {user['full_name']}</p>
                     <p><b>Type:</b> {trans_type}</p>
                     <p><b>Amount:</b> GHS {amount:.2f}</p>
+                    <p><b>Remarks:</b> {notes if notes else 'None'}</p>
                     <hr style="border: 0.5px dashed #ccc;">
                     <p style="text-align:center; font-size:11px;">Thank you for saving with us!</p>
                 </div>
@@ -402,61 +507,236 @@ def render_dashboard():
             unsafe_allow_html=True,
         )
 
-  # --- SECTION 2: CLIENTS PROGRESS SCORE ---
-  elif nav == "📊 Clients Progress Score":
-    st.subheader("📊 Clients Progress Score Comparison")
-    df_trans = pd.read_sql(
-        sqlalchemy.text(
-            "SELECT client_name, SUM(amount) as total_saved FROM transactions"
-            " WHERE trans_type='Deposit' GROUP BY client_name"
-        ),
-        engine,
-    )
+  # --- SECTION 3: MY CLIENTS & RECORDS ---
+  elif nav == "📊 My Clients & Records":
+    st.subheader("📊 Clients & Transaction Records")
+
+    if is_admin:
+      df_trans = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT id, manager_name, client_name, amount, trans_type, notes,"
+              " date FROM transactions ORDER BY date DESC"
+          ),
+          engine,
+      )
+    else:
+      df_trans = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT id, manager_name, client_name, amount, trans_type, notes,"
+              " date FROM transactions WHERE manager_name = :m ORDER BY date"
+              " DESC"
+          ),
+          engine,
+          params={"m": user["full_name"]},
+      )
+
     if not df_trans.empty:
       st.dataframe(df_trans, use_container_width=True)
-      st.bar_chart(df_trans.set_index("client_name")["total_saved"])
+
+      st.markdown("---")
+      st.subheader("🔒 Edit / Audit Controls (24-Hour Rule)")
+      st.info(
+          "Entries older than 24 hours or locked remarks cannot be edited"
+          " without Admin authorization."
+      )
+
+      edit_id = st.number_input(
+          "Enter Transaction ID to Edit/Update", min_value=1, step=1
+      )
+      row_to_edit = df_trans[df_trans["id"] == edit_id]
+
+      if not row_to_edit.empty:
+        r = row_to_edit.iloc[0]
+        trans_date = pd.to_datetime(r["date"])
+        hours_elapsed = (
+            pd.Timestamp.now() - trans_date.tz_localize(None)
+        ).total_seconds() / 3600
+
+        can_edit = is_admin or (
+            hours_elapsed <= 24 or user.get("edit_override", False)
+        )
+        can_edit_notes = is_admin or user.get("note_override", False)
+
+        if not can_edit:
+          st.error(
+              "⚠️ This transaction is older than 24 hours and locked. Contact"
+              " Admin for authorization."
+          )
+        else:
+          with st.form("edit_trans_form"):
+            new_amt = st.number_input(
+                "Update Amount (GHS)", value=float(r["amount"]), step=1.0
+            )
+            new_notes = st.text_area(
+                "Update Remarks/Notes",
+                value=str(r["notes"] if r["notes"] else ""),
+                disabled=not can_edit_notes,
+            )
+            if not can_edit_notes:
+              st.warning(
+                  "🔒 Notes/remarks are locked. Admin override is required to"
+                  " edit remarks."
+              )
+
+            if st.form_submit_button("Save Changes"):
+              with engine.begin() as conn:
+                if can_edit_notes:
+                  conn.execute(
+                      sqlalchemy.text(
+                          "UPDATE transactions SET amount = :amt, notes ="
+                          " :notes WHERE id = :id"
+                      ),
+                      {"amt": new_amt, "notes": new_notes, "id": edit_id},
+                  )
+                else:
+                  conn.execute(
+                      sqlalchemy.text(
+                          "UPDATE transactions SET amount = :amt WHERE id = :id"
+                      ),
+                      {"amt": new_amt, "id": edit_id},
+                  )
+              st.success("Transaction updated successfully!")
+              st.rerun()
     else:
-      st.info("No transaction data available yet.")
+      st.info("No transaction records found.")
 
-  # --- SECTION 3: TARGET LIMITS ---
-  elif nav == "🎯 Target Limits":
-    st.subheader("🎯 Target Limits & Collection Goals")
-    st.metric(label="Monthly Collection Target", value="GHS 10,000.00")
-    df_tot = pd.read_sql(
-        sqlalchemy.text(
-            "SELECT COALESCE(SUM(amount), 0) as collected FROM transactions"
-            " WHERE trans_type='Deposit'"
-        ),
-        engine,
-    )
-    collected = df_tot.iloc[0]["collected"]
-    st.progress(
-        min(collected / 10000.0, 1.0),
-        text=f"Progress: GHS {collected:.2f} / GHS 10,000.00",
+  # --- SECTION 4: CLIENT TARGET LIMITS ---
+  elif nav == "🎯 Client Target Limits":
+    st.subheader("🎯 Client Target Limits & Quotas")
+
+    if is_admin:
+      df_clients = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT id, manager_name, client_name, target_limit FROM clients"
+          ),
+          engine,
+      )
+    else:
+      df_clients = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT id, manager_name, client_name, target_limit FROM clients"
+              " WHERE manager_name = :m"
+          ),
+          engine,
+          params={"m": user["full_name"]},
+      )
+
+    if not df_clients.empty:
+      st.dataframe(df_clients, use_container_width=True)
+
+      c_id = st.number_input(
+          "Enter Client ID to Update Target Limit", min_value=1, step=1
+      )
+      target_row = df_clients[df_clients["id"] == c_id]
+      if not target_row.empty:
+        tr = target_row.iloc[0]
+        with st.form("target_form"):
+          new_target = st.number_input(
+              f"Set New Target Limit for {tr['client_name']} (GHS)",
+              value=float(tr["target_limit"]),
+              step=10.0,
+          )
+          if st.form_submit_button("Update Target Limit"):
+            with engine.begin() as conn:
+              conn.execute(
+                  sqlalchemy.text(
+                      "UPDATE clients SET target_limit = :t WHERE id = :id"
+                  ),
+                  {"t": new_target, "id": c_id},
+              )
+            st.success("Target limit updated successfully!")
+            st.rerun()
+    else:
+      st.info("No clients available to set target limits.")
+
+
+        # --- SECTION 5: EXPORT ENCRYPTED DATA (EXCEL/CSV) ---
+  elif nav == "📥 Export Encrypted Data (Excel/CSV)":
+    st.subheader("📥 Export Active Transaction Records")
+    st.info(
+        "Download your active workspace transaction records in encrypted or"
+        " standard CSV/Excel format."
     )
 
-  # --- SECTION 4: ADMIN - MANAGE MANAGERS & FREEZE ---
-  elif nav == "🛡️ [Admin] Manage Managers & Freeze":
+    if is_admin:
+      df_export = pd.read_sql(
+          sqlalchemy.text("SELECT * FROM transactions"), engine
+      )
+    else:
+      df_export = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT * FROM transactions WHERE manager_name = :m"
+          ),
+          engine,
+          params={"m": user["full_name"]},
+      )
+
+    if not df_export.empty:
+      csv_data = df_export.to_csv(index=False).encode("utf-8")
+      st.download_button(
+          label="📥 Download Encrypted/Standard CSV File",
+          data=csv_data,
+          file_name="alufatanaah_transactions_export.csv",
+          mime="text/csv",
+      )
+    else:
+      st.info("No data available for export.")
+
+  # --- SECTION 6: REPORT APP ISSUE / SUPPORT TICKETS ---
+  elif nav == "🛠️ Report App Issue / Problem":
+    st.subheader("🛠️ Report App Issues or Problems to Developer")
+    st.info(
+        "Use this channel to report any problems or challenges you are facing"
+        " with the application."
+    )
+
+    with st.form("issue_form"):
+      issue_msg = st.text_area(
+          "Describe the issue or problem you are encountering:"
+      )
+      if st.form_submit_button("Submit Issue"):
+        if issue_msg:
+          with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text("""
+                            INSERT INTO support_tickets (manager_name, issue_message)
+                            VALUES (:m, :msg)
+                        """),
+                {"m": user["full_name"], "msg": issue_msg},
+            )
+          st.success(
+              "Issue submitted successfully! Developer/Admin will review it."
+          )
+        else:
+          st.warning("Please describe the issue.")
+
+  # --- SECTION 7: ADMIN - MANAGER GOVERNANCE & QUOTAS ---
+  elif nav == "🛡️ [Admin] Manager Governance & Quotas":
     if not is_admin:
       st.error("Unauthorized access.")
       return
-    st.subheader("Workspace Manager Account Governance")
-    df_users = pd.read_sql(
+    st.subheader("🛡️ Workspace Manager Governance & Audit Control")
+
+    df_managers = pd.read_sql(
         sqlalchemy.text(
-            "SELECT id, full_name, phone, role, status FROM users WHERE role !="
-            " 'admin'"
+            "SELECT id, full_name, phone, client_quota, status, edit_override,"
+            " note_override FROM users WHERE role != 'admin'"
         ),
         engine,
     )
 
-    if not df_users.empty:
-      for idx, row in df_users.iterrows():
-        cols = st.columns([3, 2, 2])
-        cols[0].write(f"**{row['full_name']}** ({row['phone']})")
-        cols[1].write(f"Status: `{row['status']}`")
+    if not df_managers.empty:
+      for idx, row in df_managers.iterrows():
+        st.markdown(
+            f"**{row['full_name']}** ({row['phone']}) | Status: `{row['status']}`"
+            f" | Quota: `{row['client_quota']}` | Edit Override: "
+            f"`{row['edit_override']}` | Note Override: `{row['note_override']}`"
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
 
         if row["status"] == "Active":
-          if cols[2].button("Freeze", key=f"freeze_{row['id']}"):
+          if col1.button("Freeze", key=f"freeze_{row['id']}"):
             with engine.begin() as conn:
               conn.execute(
                   sqlalchemy.text(
@@ -464,10 +744,10 @@ def render_dashboard():
                   ),
                   {"id": row["id"]},
               )
-            st.warning(f"Account {row['full_name']} frozen.")
+            st.warning(f"Account {row['full_name']} frozen for audit.")
             st.rerun()
         else:
-          if cols[2].button("Unfreeze", key=f"unfreeze_{row['id']}"):
+          if col1.button("Unfreeze", key=f"unfreeze_{row['id']}"):
             with engine.begin() as conn:
               conn.execute(
                   sqlalchemy.text(
@@ -477,49 +757,80 @@ def render_dashboard():
               )
             st.success(f"Account {row['full_name']} restored.")
             st.rerun()
-    else:
-      st.info("No registered managers found.")
 
-  # --- SECTION 5: ADMIN - SUBSCRIPTIONS & MOMO VERIFICATION ---
-  elif nav == "💳 [Admin] Subscriptions & MoMo Verification":
-    if not is_admin:
-      st.error("Unauthorized access.")
-      return
-    st.subheader("MoMo Payment Verifications (Koffi Rogers - 0542470810)")
-    df_subs = pd.read_sql(
+        if col2.button("Grant Edit Auth", key=f"edit_{row['id']}"):
+          with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE users SET edit_override = TRUE WHERE id = :id"
+                ),
+                {"id": row["id"]},
+            )
+          st.success(f"Edit authorization granted to {row['full_name']}.")
+          st.rerun()
+
+        if col3.button("Grant Note Auth", key=f"note_{row['id']}"):
+          with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE users SET note_override = TRUE WHERE id = :id"
+                ),
+                {"id": row["id"]},
+            )
+          st.success(f"Note editing authorization granted to {row['full_name']}.")
+          st.rerun()
+
+        new_q = col4.number_input(
+            "Quota",
+            value=int(row["client_quota"]),
+            step=5,
+            key=f"q_{row['id']}",
+        )
+        if col4.button("Set Quota", key=f"set_q_{row['id']}"):
+          with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE users SET client_quota = :q WHERE id = :id"
+                ),
+                {"q": new_q, "id": row["id"]},
+            )
+          st.success(f"Quota updated to {new_q} for {row['full_name']}.")
+          st.rerun()
+        st.markdown("---")
+    else:
+      st.info("No workspace managers registered.")
+
+    st.subheader("📋 All Registered Clients Across All Workspaces")
+    df_all_clients = pd.read_sql(
         sqlalchemy.text(
-            "SELECT id, full_name, phone, subscription_status, momo_ref FROM"
-            " users WHERE momo_ref IS NOT NULL"
+            "SELECT client_name, client_phone, manager_name, target_limit,"
+            " date_registered FROM clients"
         ),
         engine,
     )
-    if not df_subs.empty:
-      for idx, row in df_subs.iterrows():
-        st.write(
-            f"**{row['full_name']}** | MoMo Ref: `{row['momo_ref']}` | Status:"
-            f" `{row['subscription_status']}`"
-        )
-        if row["subscription_status"] != "Active":
-          if st.button(
-              f"Approve Subscription for {row['full_name']}",
-              key=f"sub_{row['id']}",
-          ):
-            with engine.begin() as conn:
-              conn.execute(
-                  sqlalchemy.text(
-                      "UPDATE users SET subscription_status = 'Active' WHERE id"
-                      " = :id"
-                  ),
-                  {"id": row["id"]},
-              )
-            st.success(
-                f"Subscription activated for {row['full_name']} successfully!"
-            )
-            st.rerun()
-        else:
-          st.success("Subscription Active")
+    if not df_all_clients.empty:
+      st.dataframe(df_all_clients, use_container_width=True)
     else:
-      st.info("No pending subscription verification requests.")
+      st.info("No clients registered in the system yet.")
+
+  # --- SECTION 8: ADMIN - SUPPORT TICKETS / ISSUES ---
+  elif nav == "🛠️ App Issues & Support Tickets":
+    if not is_admin:
+      st.error("Unauthorized access.")
+      return
+    st.subheader("🛠️ Manager Issue & Problem Reports")
+
+    df_tickets = pd.read_sql(
+        sqlalchemy.text(
+            "SELECT id, manager_name, issue_message, status, date FROM"
+            " support_tickets ORDER BY date DESC"
+        ),
+        engine,
+    )
+    if not df_tickets.empty:
+      st.dataframe(df_tickets, use_container_width=True)
+    else:
+      st.info("No issues reported by managers.")
 
 
 # ---------------------------------------------------------
@@ -528,5 +839,4 @@ def render_dashboard():
 if not st.session_state.logged_in:
   render_auth()
 else:
-  check_subscription()
   render_dashboard()
