@@ -113,7 +113,7 @@ def init_db():
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # Users Table
+    # 1. Base Tables Creation
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -132,7 +132,6 @@ def init_db():
         """)
     )
 
-    # Clients Table with Unique UUID Primary Key
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS clients (
@@ -148,7 +147,6 @@ def init_db():
         """)
     )
 
-    # Transactions Table
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS transactions (
@@ -163,7 +161,6 @@ def init_db():
         """)
     )
 
-    # App Issues / Support Tickets Table
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS support_tickets (
@@ -176,13 +173,15 @@ def init_db():
         """)
     )
 
-    # Ensure All Required Columns Exist in Existing Databases
+    # 2. Robust Column Migration for Existing Tables
     columns_users = [
         ("client_quota", "INT DEFAULT 50"),
         ("edit_override", "BOOLEAN DEFAULT FALSE"),
         ("note_override", "BOOLEAN DEFAULT FALSE"),
         ("status", "TEXT DEFAULT 'Active'"),
         ("role", "TEXT DEFAULT 'manager'"),
+        ("recovery_pref", "TEXT DEFAULT 'Email'"),
+        ("email", "TEXT"),
     ]
     for col_name, col_type in columns_users:
       try:
@@ -199,6 +198,8 @@ def init_db():
         ("gender", "TEXT"),
         ("location", "TEXT"),
         ("target_limit", "FLOAT DEFAULT 0.0"),
+        ("client_phone", "TEXT"),
+        ("manager_name", "TEXT"),
     ]
     for col_name, col_type in columns_clients:
       try:
@@ -211,7 +212,25 @@ def init_db():
       except Exception:
         pass
 
-    # Seed Default System Admin Account
+    columns_trans = [
+        ("notes", "TEXT"),
+        ("manager_name", "TEXT"),
+        ("client_name", "TEXT"),
+        ("amount", "FLOAT"),
+        ("trans_type", "TEXT"),
+    ]
+    for col_name, col_type in columns_trans:
+      try:
+        conn.execute(
+            sqlalchemy.text(
+                f"ALTER TABLE transactions ADD COLUMN IF NOT EXISTS {col_name}"
+                f" {col_type};"
+            )
+        )
+      except Exception:
+        pass
+
+    # 3. Seed Default System Admin Account
     res = conn.execute(
         sqlalchemy.text("SELECT COUNT(*) FROM users WHERE role = 'admin'")
     ).fetchone()
@@ -258,7 +277,7 @@ def render_auth():
       except Exception:
         df = pd.read_sql(
             sqlalchemy.text(
-                "SELECT id, full_name, phone, email, password, role, status,"
+                "SELECT id, full_name, phone, password, role, status,"
                 " client_quota, edit_override, note_override, recovery_pref FROM"
                 " users WHERE phone = :id"
             ),
@@ -383,7 +402,7 @@ def render_auth():
         st.warning("Please fill out all fields.")
 
 
-# ---------------------------------------------------------
+          # ---------------------------------------------------------
 # MAIN DASHBOARD (WORKSPACE + ADMIN PRIVILEGES)
 # ---------------------------------------------------------
 def render_dashboard():
@@ -476,8 +495,7 @@ def render_dashboard():
         except Exception as e:
           st.error(f"Error registering client: {e}")
 
-
-            # --- SECTION 2: RECORD TRANSACTION & RECEIPT ---
+  # --- SECTION 2: RECORD TRANSACTION & RECEIPT ---
   elif nav == "📥 Record Transaction & Receipts":
     st.subheader("📥 Record Daily Transaction & Generate PDF/Print Receipt")
 
@@ -947,8 +965,4 @@ def render_dashboard():
 
 # ---------------------------------------------------------
 # MAIN APP ROUTER
-# ---------------------------------------------------------
-if not st.session_state.logged_in:
-  render_auth()
-else:
-  render_dashboard()
+# -------------------------------------------------
