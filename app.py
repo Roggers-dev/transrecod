@@ -43,31 +43,35 @@ st.markdown(
     .receipt-container {
         max-width: 380px;
         margin: 20px auto;
-        padding: 20px;
         background: #ffffff;
-        border: 1px solid #e0e0e0;
+        border: 1px solid #d0d0d0;
         border-radius: 12px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         font-family: monospace;
         color: #111111;
+        overflow: hidden;
     }
-    .receipt-title {
+    .receipt-header-bg {
+        background-color: #FF4B4B;
+        color: white;
+        padding: 15px;
         text-align: center;
-        font-weight: bold;
-        font-size: 16px;
-        margin-bottom: 0;
     }
-    .receipt-subtitle {
+    .receipt-footer-bg {
+        background-color: #2C3E50;
+        color: white;
+        padding: 12px;
         text-align: center;
-        font-size: 11px;
-        color: #666;
-        margin-bottom: 15px;
+        font-size: 10px;
+    }
+    .receipt-body {
+        padding: 15px;
     }
     </style>
 
     <div class="developer-footer">
         <strong>🚀 AlufaTanaah Record Keeper</strong><br>
-        Developer: Roggers Enterprises Limited<br>
+        ©️ Rogers Enterprises Limited | Ghana<br>
         📧 koffieroggers@gmail.com | Enchi
     </div>
     """,
@@ -76,7 +80,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# PDF RECEIPT GENERATOR WITH CUSTOM HEADER & BRANDING
+# PDF RECEIPT GENERATOR WITH COLORED HEADER & FOOTER
 # ---------------------------------------------------------
 def create_receipt_pdf(
     receipt_no,
@@ -90,23 +94,41 @@ def create_receipt_pdf(
     notes,
 ):
   pdf = FPDF(orientation="P", unit="mm", format=(105, 160))
-  pdf.set_auto_page_break(auto=True, margin=10)
+  pdf.set_auto_page_break(auto=False)
   pdf.add_page()
 
-  # Header (Uses Manager's Custom Company Header)
+  # 1. TOP HEADER BACKGROUND (Red Banner)
   pdf.set_fill_color(255, 75, 75)
-  pdf.rect(0, 0, 105, 22, "F")
+  pdf.rect(0, 0, 105, 24, "F")
   pdf.set_text_color(255, 255, 255)
   pdf.set_font("Helvetica", "B", 12)
-  pdf.set_xy(5, 4)
+  pdf.set_xy(5, 5)
   safe_header = str(company_header).encode("latin-1", "replace").decode("latin-1")
   pdf.cell(95, 6, safe_header[:35], ln=True, align="C")
   pdf.set_font("Helvetica", "", 8)
   pdf.cell(95, 5, "OFFICIAL TRANSACTION RECEIPT", ln=True, align="C")
 
-  # Body
+  # 2. BOTTOM FOOTER BACKGROUND (Dark Professional Banner)
+  pdf.set_fill_color(44, 62, 80)
+  pdf.rect(0, 138, 105, 22, "F")
+  pdf.set_text_color(255, 255, 255)
+  pdf.set_xy(5, 141)
+  pdf.set_font("Helvetica", "I", 8)
+  pdf.cell(95, 4, "Thank you for working with us.", ln=True, align="C")
+  pdf.set_font("Helvetica", "B", 7)
+  pdf.cell(
+      95,
+      4,
+      "Empowered by Rogers Enterprises Limited | Ghana".encode(
+          "latin-1", "replace"
+      ).decode("latin-1"),
+      ln=True,
+      align="C",
+  )
+
+  # 3. BODY CONTENT
   pdf.set_text_color(20, 20, 20)
-  pdf.set_xy(8, 27)
+  pdf.set_xy(8, 30)
   pdf.set_font("Helvetica", "B", 9)
   pdf.cell(40, 6, "Receipt No:", 0, 0)
   pdf.set_font("Helvetica", "", 9)
@@ -119,7 +141,7 @@ def create_receipt_pdf(
   pdf.cell(49, 6, str(date_str), 0, 1, "R")
 
   pdf.line(8, pdf.get_y() + 2, 97, pdf.get_y() + 2)
-  pdf.ln(5)
+  pdf.ln(4)
 
   details = [
       ("Client Name:", str(client_name)),
@@ -139,12 +161,12 @@ def create_receipt_pdf(
   pdf.set_fill_color(245, 245, 245)
   pdf.set_x(8)
   pdf.set_font("Helvetica", "B", 11)
-  pdf.cell(40, 10, "TOTAL AMOUNT:", 0, 0, "L", True)
+  pdf.cell(40, 9, "TOTAL AMOUNT:", 0, 0, "L", True)
   pdf.set_text_color(200, 40, 40)
-  pdf.cell(49, 10, f"GHS {amount:,.2f}", 0, 1, "R", True)
+  pdf.cell(49, 9, f"GHS {amount:,.2f}", 0, 1, "R", True)
 
   pdf.set_text_color(40, 40, 40)
-  pdf.ln(3)
+  pdf.ln(2)
   pdf.set_x(8)
   pdf.set_font("Helvetica", "B", 8)
   pdf.cell(89, 5, "Remarks / Notes:", 0, 1)
@@ -152,17 +174,6 @@ def create_receipt_pdf(
   pdf.set_font("Helvetica", "", 8)
   safe_notes = (notes if notes else "None").encode("latin-1", "replace").decode("latin-1")
   pdf.multi_cell(89, 4, safe_notes)
-
-  # Footer
-  pdf.set_y(-25)
-  pdf.line(8, pdf.get_y(), 97, pdf.get_y())
-  pdf.ln(2)
-  pdf.set_font("Helvetica", "I", 8)
-  pdf.set_text_color(100, 100, 100)
-  pdf.cell(0, 4, "Thank you for working with us.", 0, 1, "C")
-  pdf.set_font("Helvetica", "B", 7)
-  pdf.set_text_color(50, 50, 50)
-  pdf.cell(0, 4, "Roggers Enterprises Limited", 0, 1, "C")
 
   return bytes(pdf.output())
 
@@ -443,8 +454,7 @@ def render_auth():
       else:
         st.warning("Please fill out all fields.")
 
-
-# ---------------------------------------------------------
+          # ---------------------------------------------------------
 # MAIN DASHBOARD
 # ---------------------------------------------------------
 def render_dashboard():
@@ -533,7 +543,7 @@ def render_dashboard():
           except Exception as e:
             st.error(f"Error registering client: {e}")
 
-              # 2. RECORD TRANSACTION & PDF RECEIPT
+  # 2. RECORD TRANSACTION & PDF RECEIPT
   elif nav == "📥 Record Transaction & Receipts":
     st.subheader("📥 Record Daily Transaction & Share PDF Receipt")
     if is_admin:
@@ -626,18 +636,25 @@ def render_dashboard():
       rec = st.session_state.last_receipt
       receipt_html = f"""
             <div class="receipt-container">
-                <p class="receipt-title">{rec['company_header']}</p>
-                <p class="receipt-subtitle">Official Mobile Receipt ({rec['receipt_no']})</p>
-                <hr style="border: 0.5px dashed #ccc;">
-                <p><b>Date:</b> {rec['date_str']}</p>
-                <p><b>Client:</b> {rec['client_name']} ({rec['client_id']})</p>
-                <p><b>Collector/Mgr:</b> {rec['manager_name']}</p>
-                <p><b>Type:</b> {rec['trans_type']}</p>
-                <p><b>Amount:</b> GHS {rec['amount']:,.2f}</p>
-                <p><b>Remarks:</b> {rec['notes'] if rec['notes'] else 'None'}</p>
-                <hr style="border: 0.5px dashed #ccc;">
-                <p style="text-align:center; font-size:11px; margin-bottom: 2px;">Thank you for working with us.</p>
-                <p style="text-align:center; font-size:9px; color:#666; font-weight:bold;">Roggers Enterprises Limited</p>
+                <div class="receipt-header-bg">
+                    <p style="margin:0; font-weight:bold; font-size:15px;">{rec['company_header']}</p>
+                    <p style="margin:2px 0 0 0; font-size:10px; opacity:0.9;">OFFICIAL TRANSACTION RECEIPT</p>
+                </div>
+                <div class="receipt-body">
+                    <p><b>Receipt No:</b> {rec['receipt_no']}</p>
+                    <p><b>Date & Time:</b> {rec['date_str']}</p>
+                    <hr style="border: 0.5px dashed #ccc;">
+                    <p><b>Client Name:</b> {rec['client_name']}</p>
+                    <p><b>Client ID:</b> {rec['client_id']}</p>
+                    <p><b>Collector/Mgr:</b> {rec['manager_name']}</p>
+                    <p><b>Transaction:</b> {rec['trans_type'].upper()}</p>
+                    <p style="background:#f9f9f9; padding:8px; border-radius:4px; margin-top:8px;"><b>TOTAL AMOUNT:</b> GHS {rec['amount']:,.2f}</p>
+                    <p><b>Remarks:</b> {rec['notes'] if rec['notes'] else 'None'}</p>
+                </div>
+                <div class="receipt-footer-bg">
+                    <p style="margin:0; font-style:italic; font-size:10px;">Thank you for working with us.</p>
+                    <p style="margin:2px 0 0 0; font-size:9px; font-weight:bold;">Empowered by Rogers Enterprises Limited | Ghana</p>
+                </div>
             </div>
             """
       st.markdown(receipt_html, unsafe_allow_html=True)
