@@ -76,22 +76,31 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# PDF RECEIPT GENERATOR (SHAREABLE ON MOBILE & DESKTOP)
+# PDF RECEIPT GENERATOR WITH CUSTOM HEADER
 # ---------------------------------------------------------
 def create_receipt_pdf(
-    receipt_no, date_str, client_name, client_id, manager_name, trans_type, amount, notes
+    receipt_no,
+    date_str,
+    client_name,
+    client_id,
+    manager_name,
+    company_header,
+    trans_type,
+    amount,
+    notes,
 ):
   pdf = FPDF(orientation="P", unit="mm", format=(105, 160))
   pdf.set_auto_page_break(auto=True, margin=10)
   pdf.add_page()
 
-  # Header
+  # Header (Uses Manager's Custom Company Header if set)
   pdf.set_fill_color(255, 75, 75)
   pdf.rect(0, 0, 105, 22, "F")
   pdf.set_text_color(255, 255, 255)
-  pdf.set_font("Helvetica", "B", 13)
-  pdf.set_xy(5, 5)
-  pdf.cell(95, 6, "AlufaTanaah Record Keeper", ln=True, align="C")
+  pdf.set_font("Helvetica", "B", 12)
+  pdf.set_xy(5, 4)
+  safe_header = str(company_header).encode("latin-1", "replace").decode("latin-1")
+  pdf.cell(95, 6, safe_header[:35], ln=True, align="C")
   pdf.set_font("Helvetica", "", 8)
   pdf.cell(95, 5, "OFFICIAL TRANSACTION RECEIPT", ln=True, align="C")
 
@@ -115,7 +124,7 @@ def create_receipt_pdf(
   details = [
       ("Client Name:", str(client_name)),
       ("Client ID:", str(client_id)),
-      ("Manager:", str(manager_name)),
+      ("Collector/Mgr:", str(manager_name)),
       ("Transaction:", str(trans_type).upper()),
   ]
   for label, val in details:
@@ -123,7 +132,7 @@ def create_receipt_pdf(
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(35, 6, label, 0, 0)
     pdf.set_font("Helvetica", "", 9)
-    safe_val = val.encode("latin-1", "replace").decode("latin-1")
+    safe_val = str(val).encode("latin-1", "replace").decode("latin-1")
     pdf.cell(54, 6, safe_val[:28], 0, 1, "R")
 
   pdf.ln(2)
@@ -150,7 +159,7 @@ def create_receipt_pdf(
   pdf.ln(2)
   pdf.set_font("Helvetica", "I", 8)
   pdf.set_text_color(100, 100, 100)
-  pdf.cell(0, 4, "Thank you for transacting with us!", 0, 1, "C")
+  pdf.cell(0, 4, "Thank you for saving with us!", 0, 1, "C")
   pdf.set_font("Helvetica", "", 7)
   pdf.cell(0, 4, "Powered by Rogers Enterprises Limited | Enchi", 0, 1, "C")
 
@@ -202,7 +211,8 @@ def init_db():
                 recovery_pref TEXT DEFAULT 'Email',
                 client_quota INT DEFAULT 50,
                 edit_override BOOLEAN DEFAULT FALSE,
-                note_override BOOLEAN DEFAULT FALSE
+                note_override BOOLEAN DEFAULT FALSE,
+                company_header TEXT DEFAULT 'AlufaTanaah Record Keeper'
             )
         """)
     )
@@ -259,6 +269,7 @@ def init_db():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'manager';",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_pref TEXT DEFAULT 'Email';",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS company_header TEXT DEFAULT 'AlufaTanaah Record Keeper';",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS manager_name TEXT;",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_phone TEXT;",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS gender TEXT;",
@@ -284,8 +295,8 @@ def init_db():
 
     conn.execute(
         sqlalchemy.text("""
-            INSERT INTO users (full_name, phone, email, password, role, status, client_quota)
-            VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', 'admin123', 'admin', 'Active', 9999)
+            INSERT INTO users (full_name, phone, email, password, role, status, client_quota, company_header)
+            VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', 'admin123', 'admin', 'Active', 9999, 'AlufaTanaah Record Keeper')
             ON CONFLICT (phone) DO UPDATE 
             SET password = 'admin123', role = 'admin', status = 'Active';
         """)
@@ -320,8 +331,8 @@ def render_auth():
     if st.button("Log In"):
       df = safe_read_sql(
           "SELECT id, full_name, phone, email, password, role, status,"
-          " client_quota, edit_override, note_override, recovery_pref FROM"
-          " users WHERE phone = :id OR email = :id",
+          " client_quota, edit_override, note_override, recovery_pref,"
+          " company_header FROM users WHERE phone = :id OR email = :id",
           params={"id": login_phone},
       )
 
@@ -349,6 +360,10 @@ def render_auth():
       reg_phone = st.text_input("Phone Number").strip()
       reg_email = st.text_input("Email Address (Optional)").strip()
       reg_pass = st.text_input("Create Password", type="password")
+      reg_header = st.text_input(
+          "Preferred Company Name on Receipts (Optional)",
+          value="AlufaTanaah Record Keeper",
+      ).strip()
       recovery_choice = st.radio(
           "Preferred Password Recovery Channel:", ["Email", "Phone"]
       )
@@ -356,12 +371,15 @@ def render_auth():
       submitted_reg = st.form_submit_button("Register Account")
       if submitted_reg:
         if reg_name and reg_phone and reg_pass:
+          header_val = (
+              reg_header if reg_header else "AlufaTanaah Record Keeper"
+          )
           try:
             with engine.begin() as conn:
               conn.execute(
                   sqlalchemy.text("""
-                              INSERT INTO users (full_name, phone, email, password, role, recovery_pref, client_quota)
-                              VALUES (:name, :phone, :email, :passwd, 'manager', :rec, 50)
+                              INSERT INTO users (full_name, phone, email, password, role, recovery_pref, client_quota, company_header)
+                              VALUES (:name, :phone, :email, :passwd, 'manager', :rec, 50, :header)
                           """),
                   {
                       "name": reg_name,
@@ -369,6 +387,7 @@ def render_auth():
                       "email": reg_email,
                       "passwd": reg_pass,
                       "rec": recovery_choice,
+                      "header": header_val,
                   },
               )
             st.success(
@@ -423,7 +442,8 @@ def render_auth():
       else:
         st.warning("Please fill out all fields.")
 
-          # ---------------------------------------------------------
+
+# ---------------------------------------------------------
 # MAIN DASHBOARD
 # ---------------------------------------------------------
 def render_dashboard():
@@ -435,6 +455,7 @@ def render_dashboard():
     nav_options = [
         "👥 Register Client",
         "📥 Record Transaction & Receipts",
+        "⚙️ Workspace & Receipt Settings",
         "📊 My Clients & Records",
         "🎯 Client Target Limits",
         "📥 Export Encrypted Data (Excel/CSV)",
@@ -447,6 +468,7 @@ def render_dashboard():
     nav_options = [
         "👥 Register Client",
         "📥 Record Transaction & Receipts",
+        "⚙️ Workspace & Receipt Settings",
         "📊 My Clients & Records",
         "🎯 Client Target Limits",
         "📥 Export Encrypted Data (Excel/CSV)",
@@ -510,7 +532,7 @@ def render_dashboard():
           except Exception as e:
             st.error(f"Error registering client: {e}")
 
-  # 2. RECORD TRANSACTION & PDF RECEIPT
+              # 2. RECORD TRANSACTION & PDF RECEIPT
   elif nav == "📥 Record Transaction & Receipts":
     st.subheader("📥 Record Daily Transaction & Share PDF Receipt")
     if is_admin:
@@ -547,6 +569,9 @@ def render_dashboard():
         else:
           c_id, c_name = client_options[selected_label]
           now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+          current_header = user.get(
+              "company_header", "AlufaTanaah Record Keeper"
+          )
           try:
             with engine.begin() as conn:
               res = conn.execute(
@@ -573,6 +598,7 @@ def render_dashboard():
                 client_name=c_name,
                 client_id=c_id,
                 manager_name=user["full_name"],
+                company_header=current_header,
                 trans_type=trans_type,
                 amount=float(amount),
                 notes=notes,
@@ -584,6 +610,7 @@ def render_dashboard():
                 "client_name": c_name,
                 "client_id": c_id,
                 "manager_name": user["full_name"],
+                "company_header": current_header,
                 "trans_type": trans_type,
                 "amount": float(amount),
                 "notes": notes,
@@ -598,12 +625,12 @@ def render_dashboard():
       rec = st.session_state.last_receipt
       receipt_html = f"""
             <div class="receipt-container">
-                <p class="receipt-title">AlufaTanaah Record Keeper</p>
+                <p class="receipt-title">{rec['company_header']}</p>
                 <p class="receipt-subtitle">Official Mobile Receipt ({rec['receipt_no']})</p>
                 <hr style="border: 0.5px dashed #ccc;">
                 <p><b>Date:</b> {rec['date_str']}</p>
                 <p><b>Client:</b> {rec['client_name']} ({rec['client_id']})</p>
-                <p><b>Manager:</b> {rec['manager_name']}</p>
+                <p><b>Collector/Mgr:</b> {rec['manager_name']}</p>
                 <p><b>Type:</b> {rec['trans_type']}</p>
                 <p><b>Amount:</b> GHS {rec['amount']:,.2f}</p>
                 <p><b>Remarks:</b> {rec['notes'] if rec['notes'] else 'None'}</p>
@@ -623,7 +650,35 @@ def render_dashboard():
             use_container_width=True,
         )
 
-  # 3. MY CLIENTS & RECORDS
+  # 3. WORKSPACE & RECEIPT SETTINGS
+  elif nav == "⚙️ Workspace & Receipt Settings":
+    st.subheader("⚙️ Customize Your Receipt Header / Company Name")
+    st.info(
+        "Enter the business or company name you want to appear at the top of"
+        " your digital previews and downloaded PDF receipts."
+    )
+
+    current_h = user.get("company_header", "AlufaTanaah Record Keeper")
+    with st.form("header_form"):
+      new_header_input = st.text_input(
+          "Company / Business Name on Receipts", value=current_h
+      ).strip()
+      if st.form_submit_button("Save Receipt Header"):
+        if new_header_input:
+          with engine.begin() as conn:
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE users SET company_header = :h WHERE phone = :p"
+                ),
+                {"h": new_header_input, "p": user["phone"]},
+            )
+          st.session_state.user["company_header"] = new_header_input
+          st.success("Receipt header updated successfully!")
+          st.rerun()
+        else:
+          st.warning("Receipt header cannot be empty.")
+
+  # 4. MY CLIENTS & RECORDS
   elif nav == "📊 My Clients & Records":
     st.subheader("📊 Workspace Clients, Transaction Sums & Search Filtering")
 
@@ -834,7 +889,7 @@ def render_dashboard():
     else:
       st.info("No transaction records found.")
 
-  # 4. TARGET LIMITS
+  # 5. TARGET LIMITS
   elif nav == "🎯 Client Target Limits":
     st.subheader("🎯 Client Target Limits")
     if is_admin:
@@ -878,8 +933,7 @@ def render_dashboard():
     else:
       st.info("No clients available.")
 
-
-        # 5. EXPORT
+        # 6. EXPORT
   elif nav == "📥 Export Encrypted Data (Excel/CSV)":
     st.subheader("📥 Export Transaction Records")
     if is_admin:
@@ -901,7 +955,7 @@ def render_dashboard():
     else:
       st.info("No data available for export.")
 
-  # 6. REPORT ISSUE
+  # 7. REPORT ISSUE
   elif nav == "🛠️ Report App Issue / Problem":
     st.subheader("🛠️ Report App Issue to Developer")
     with st.form("issue_form", clear_on_submit=True):
@@ -920,7 +974,7 @@ def render_dashboard():
         else:
           st.warning("Please describe the issue.")
 
-  # 7. ADMIN GOVERNANCE
+  # 8. ADMIN GOVERNANCE
   elif nav == "🛡️ [Admin] Manager Governance & Quotas":
     if not is_admin:
       st.error("Unauthorized access.")
@@ -1009,10 +1063,10 @@ def render_dashboard():
     )
     st.dataframe(df_all_clients, use_container_width=True)
 
-  # 8. SUPPORT TICKETS
+  # 9. SUPPORT TICKETS
   elif nav == "🛠️ App Issues & Support Tickets":
     if not is_admin:
-      st.error("Unauthorized access.")
+      st.error("Unauthorized access radians")
       return
     st.subheader("🛠️ Manager Issue & Problem Reports")
     df_tickets = safe_read_sql(
