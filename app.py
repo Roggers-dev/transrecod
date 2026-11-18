@@ -1,4 +1,5 @@
 from datetime import datetime
+import urllib.parse
 import uuid
 from fpdf import FPDF
 import pandas as pd
@@ -80,7 +81,23 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# PDF RECEIPT GENERATOR WITH COLORED HEADER & FOOTER
+# WHATSAPP PHONE NUMBER NORMALIZER (GHANA FORMAT)
+# ---------------------------------------------------------
+def normalize_ghana_phone(phone_str):
+  if not phone_str:
+    return ""
+  digits = "".join(filter(str.isdigit, str(phone_str)))
+  if digits.startswith("233") and len(digits) >= 12:
+    return "+" + digits
+  elif digits.startswith("0") and len(digits) == 10:
+    return "+233" + digits[1:]
+  elif len(digits) == 9:
+    return "+233" + digits
+  return "+" + digits if digits else ""
+
+
+# ---------------------------------------------------------
+# PDF RECEIPT GENERATOR
 # ---------------------------------------------------------
 def create_receipt_pdf(
     receipt_no,
@@ -97,7 +114,6 @@ def create_receipt_pdf(
   pdf.set_auto_page_break(auto=False)
   pdf.add_page()
 
-  # 1. TOP HEADER BACKGROUND (Red Banner)
   pdf.set_fill_color(255, 75, 75)
   pdf.rect(0, 0, 105, 24, "F")
   pdf.set_text_color(255, 255, 255)
@@ -108,7 +124,6 @@ def create_receipt_pdf(
   pdf.set_font("Helvetica", "", 8)
   pdf.cell(95, 5, "OFFICIAL TRANSACTION RECEIPT", ln=True, align="C")
 
-  # 2. BOTTOM FOOTER BACKGROUND (Dark Professional Banner)
   pdf.set_fill_color(44, 62, 80)
   pdf.rect(0, 138, 105, 22, "F")
   pdf.set_text_color(255, 255, 255)
@@ -126,7 +141,6 @@ def create_receipt_pdf(
       align="C",
   )
 
-  # 3. BODY CONTENT
   pdf.set_text_color(20, 20, 20)
   pdf.set_xy(8, 30)
   pdf.set_font("Helvetica", "B", 9)
@@ -179,7 +193,7 @@ def create_receipt_pdf(
 
 
 # ---------------------------------------------------------
-# DATABASE CONNECTION & SELF-HEALING SCHEMA MIGRATIONS
+# DATABASE CONNECTION & SCHEMA MIGRATIONS
 # ---------------------------------------------------------
 @st.cache_resource
 def get_sqlalchemy_engine():
@@ -220,6 +234,7 @@ def init_db():
                 password TEXT NOT NULL,
                 role TEXT DEFAULT 'manager',
                 status TEXT DEFAULT 'Active',
+                suspension_reason TEXT DEFAULT '',
                 recovery_pref TEXT DEFAULT 'Email',
                 client_quota INT DEFAULT 50,
                 edit_override BOOLEAN DEFAULT FALSE,
@@ -265,6 +280,7 @@ def init_db():
                 id SERIAL PRIMARY KEY,
                 manager_name TEXT,
                 issue_message TEXT,
+                admin_reply TEXT DEFAULT '',
                 status TEXT DEFAULT 'Pending',
                 date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -272,6 +288,8 @@ def init_db():
     )
 
     schema_migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT DEFAULT '';",
+        "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS admin_reply TEXT DEFAULT '';",
         "ALTER TABLE clients ALTER COLUMN id DROP DEFAULT;",
         "ALTER TABLE clients ALTER COLUMN id TYPE TEXT USING id::TEXT;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS client_quota INT DEFAULT 50;",
@@ -343,23 +361,19 @@ def render_auth():
     if st.button("Log In"):
       df = safe_read_sql(
           "SELECT id, full_name, phone, email, password, role, status,"
-          " client_quota, edit_override, note_override, recovery_pref,"
-          " company_header FROM users WHERE phone = :id OR email = :id",
+          " suspension_reason, client_quota, edit_override, note_override,"
+          " recovery_pref, company_header FROM users WHERE phone = :id OR email"
+          " = :id",
           params={"id": login_phone},
       )
 
       if not df.empty:
         user = df.iloc[0]
         if user["password"] == login_pass:
-          if user["status"] == "Frozen":
-            st.error(
-                "⚠️ Your account has been frozen by administration for audit."
-            )
-          else:
-            st.session_state.logged_in = True
-            st.session_state.user = user.to_dict()
-            st.success("Login successful!")
-            st.rerun()
+          st.session_state.logged_in = True
+          st.session_state.user = user.to_dict()
+          st.success("Login successful!")
+          st.rerun()
         else:
           st.error("Incorrect password.")
       else:
@@ -454,12 +468,44 @@ def render_auth():
       else:
         st.warning("Please fill out all fields.")
 
-          # ---------------------------------------------------------
+
+# ---------------------------------------------------------
 # MAIN DASHBOARD
 # ---------------------------------------------------------
 def render_dashboard():
   user = st.session_state.user
   is_admin = user["role"] == "admin"
+
+  # CHECK SUSPENSION STATUS FOR MANAGERS
+  if not is_admin and user.get("status") == "Frozen":
+    st.error("⚠️ ACCOUNT SUSPENDED BY ADMINISTRATION")
+    st.warning(
+        f"**Reason / Message from Admin:**\n\n> {user.get('suspension_reason', 'No specific reason provided.')}"
+    )
+    st.info(
+        "Your account is currently in read-only suspension. You cannot record"
+        " new transactions or edit records until the admin reactivates your"
+        " account. You may review your past records below or file a support"
+        " ticket."
+    )
+
+    if st.button("Log Out"):
+      st.session_state.logged_in = False
+      st.session_state.user = None
+      st.session_state.last_receipt = None
+      st.rerun()
+
+    st.markdown("---")
+    st.subheader("📊 Read-Only Workspace Review")
+    df_read = safe_read_sql(
+        "SELECT * FROM transactions WHERE manager_name = :m ORDER BY date DESC",
+        params={"m": user["full_name"]},
+    )
+    if not df_read.empty:
+      st.dataframe(df_read, use_container_width=True)
+    else:
+      st.info("No transaction records found in your workspace.")
+    return
 
   if is_admin:
     st.sidebar.title(f"🛡️ Admin: {user['full_name']}")
@@ -494,7 +540,7 @@ def render_dashboard():
     st.session_state.last_receipt = None
     st.rerun()
 
-  # 1. REGISTER CLIENT
+      # 1. REGISTER CLIENT
   if nav == "👥 Register Client":
     st.subheader("👥 Register New Client")
     if not is_admin:
@@ -511,7 +557,7 @@ def render_dashboard():
 
     with st.form("client_reg_form", clear_on_submit=True):
       c_name = st.text_input("Client Full Name").strip()
-      c_phone = st.text_input("Client Phone Number").strip()
+      c_phone = st.text_input("Client Phone Number (e.g. 0241234567)").strip()
       c_gender = st.selectbox("Gender", ["Male", "Female", "Other"])
       c_location = st.text_input("Location / Address").strip()
 
@@ -543,16 +589,16 @@ def render_dashboard():
           except Exception as e:
             st.error(f"Error registering client: {e}")
 
-  # 2. RECORD TRANSACTION & PDF RECEIPT
+  # 2. RECORD TRANSACTION & PDF RECEIPT + WHATSAPP NOTIFICATION
   elif nav == "📥 Record Transaction & Receipts":
     st.subheader("📥 Record Daily Transaction & Share PDF Receipt")
     if is_admin:
       df_clients = safe_read_sql(
-          "SELECT id, client_name FROM clients ORDER BY client_name ASC"
+          "SELECT id, client_name, client_phone FROM clients ORDER BY client_name ASC"
       )
     else:
       df_clients = safe_read_sql(
-          "SELECT id, client_name FROM clients WHERE manager_name = :m ORDER BY client_name ASC",
+          "SELECT id, client_name, client_phone FROM clients WHERE manager_name = :m ORDER BY client_name ASC",
           params={"m": user["full_name"]},
       )
 
@@ -560,15 +606,17 @@ def render_dashboard():
       st.warning("⚠️ Please register at least one client first.")
       return
 
-    client_options = {
-        f"{row['client_name']} ({row['id']})": (row["id"], row["client_name"])
+    client_dict = {
+        f"{row['client_name']} ({row['id']})": {
+            "id": row["id"],
+            "name": row["client_name"],
+            "phone": row["client_phone"],
+        }
         for _, row in df_clients.iterrows()
     }
 
     with st.form("trans_form", clear_on_submit=True):
-      selected_label = st.selectbox(
-          "Select Client", list(client_options.keys())
-      )
+      selected_label = st.selectbox("Select Client", list(client_dict.keys()))
       amount = st.number_input("Amount (GHS)", min_value=0.0, step=1.0)
       trans_type = st.selectbox("Transaction Type", ["Deposit", "Withdrawal"])
       notes = st.text_area("Notes / Remarks (Locked after 24 hrs)")
@@ -578,7 +626,12 @@ def render_dashboard():
         if amount <= 0:
           st.warning("Please enter an amount greater than 0.")
         else:
-          c_id, c_name = client_options[selected_label]
+          c_data = client_dict[selected_label]
+          c_id, c_name, c_phone = (
+              c_data["id"],
+              c_data["name"],
+              c_data["phone"],
+          )
           now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
           current_header = user.get(
               "company_header", "AlufaTanaah Record Keeper"
@@ -620,6 +673,7 @@ def render_dashboard():
                 "date_str": now_str,
                 "client_name": c_name,
                 "client_id": c_id,
+                "client_phone": c_phone,
                 "manager_name": user["full_name"],
                 "company_header": current_header,
                 "trans_type": trans_type,
@@ -659,24 +713,41 @@ def render_dashboard():
             """
       st.markdown(receipt_html, unsafe_allow_html=True)
 
-      col_dl1, col_dl2, col_dl3 = st.columns([1, 2, 1])
-      with col_dl2:
+      col_dl1, col_dl2 = st.columns(2)
+      with col_dl1:
         st.download_button(
-            label="📥 Download / Share PDF Receipt",
+            label="📥 Download PDF Receipt",
             data=rec["pdf_bytes"],
             file_name=rec["file_name"],
             mime="application/pdf",
             use_container_width=True,
         )
 
-  # 3. WORKSPACE & RECEIPT SETTINGS
+      with col_dl2:
+        if rec["client_phone"]:
+          clean_ph = normalize_ghana_phone(rec["client_phone"])
+          wa_msg = (
+              f"Hello {rec['client_name']}, your {rec['trans_type'].lower()} of"
+              f" GHS {rec['amount']:,.2f} has been successfully recorded on your"
+              f" account ({rec['client_id']}) on {rec['date_str']}. Receipt No:"
+              f" {rec['receipt_no']}. Thank you for working with us. - "
+              f"{rec['company_header']}"
+          )
+          encoded_msg = urllib.parse.quote(wa_msg)
+          wa_url = f"https://wa.me/{clean_ph}?text={encoded_msg}"
+          st.markdown(
+              f'<a href="{wa_url}" target="_blank" style="display:block; text-align:center; background-color:#25D366; color:white; padding:10px 15px; border-radius:5px; text-decoration:none; font-weight:bold; font-size:14px; margin-top:0px;">💬 Send WhatsApp Notification</a>',
+              unsafe_allow_html=True,
+          )
+        else:
+          st.info(
+              "⚠️ Client has no phone number recorded for WhatsApp alerts."
+          )
+
+
+            # 3. WORKSPACE & RECEIPT SETTINGS
   elif nav == "⚙️ Workspace & Receipt Settings":
     st.subheader("⚙️ Customize Your Receipt Header / Company Name")
-    st.info(
-        "Enter the business or company name you want to appear at the top of"
-        " your digital previews and downloaded PDF receipts."
-    )
-
     current_h = user.get("company_header", "AlufaTanaah Record Keeper")
     with st.form("header_form"):
       new_header_input = st.text_input(
@@ -768,23 +839,9 @@ def render_dashboard():
             - df_clients_summary["Total Withdrawals (GHS)"]
         )
 
-      st.markdown("### 🔍 Search, Filter & Sort Clients")
-      col_f1, col_f2 = st.columns([2, 1])
-      with col_f1:
-        search_query = st.text_input(
-            "🔎 Search by client name, phone, location, or Unique ID:"
-        )
-      with col_f2:
-        sort_by = st.selectbox(
-            "Sort Clients By:",
-            [
-                "Client Name (A-Z)",
-                "Highest Net Balance",
-                "Highest Total Deposits",
-                "Newest Registered",
-            ],
-        )
-
+      search_query = st.text_input(
+          "🔎 Search by client name, phone, location, or Unique ID:"
+      )
       if search_query:
         mask = (
             df_clients_summary["client_name"]
@@ -804,111 +861,18 @@ def render_dashboard():
       else:
         df_clients_filtered = df_clients_summary
 
-      if sort_by == "Client Name (A-Z)":
-        df_clients_filtered = df_clients_filtered.sort_values(
-            by="client_name", ascending=True
-        )
-      elif sort_by == "Highest Net Balance":
-        df_clients_filtered = df_clients_filtered.sort_values(
-            by="Net Balance (GHS)", ascending=False
-        )
-      elif sort_by == "Highest Total Deposits":
-        df_clients_filtered = df_clients_filtered.sort_values(
-            by="Total Deposits (GHS)", ascending=False
-        )
-      elif sort_by == "Newest Registered":
-        df_clients_filtered = df_clients_filtered.sort_values(
-            by="date_registered", ascending=False
-        )
-
-      m1, m2, m3 = st.columns(3)
-      m1.metric(
-          "Filtered Deposits",
-          f"GHS {df_clients_filtered['Total Deposits (GHS)'].sum():,.2f}",
-      )
-      m2.metric(
-          "Filtered Withdrawals",
-          f"GHS {df_clients_filtered['Total Withdrawals (GHS)'].sum():,.2f}",
-      )
-      m3.metric(
-          "Filtered Net Balance",
-          f"GHS {df_clients_filtered['Net Balance (GHS)'].sum():,.2f}",
-      )
-
       st.dataframe(df_clients_filtered, use_container_width=True)
     else:
       st.info("No registered clients found in this workspace.")
 
     st.markdown("---")
-    st.subheader("📊 Transaction History & Filter")
-    trans_search = st.text_input("🔎 Filter transactions by client name:")
-    if not df_trans.empty and trans_search:
-      df_trans = df_trans[
-          df_trans["client_name"]
-          .astype(str)
-          .str.contains(trans_search, case=False, na=False)
-      ]
-
+    st.subheader("📊 Transaction History & Edit Controls")
     if not df_trans.empty:
       st.dataframe(df_trans, use_container_width=True)
-      st.markdown("---")
-      st.subheader("🔒 Edit / Audit Controls (24-Hour Rule)")
-      edit_id = st.number_input(
-          "Enter Transaction ID to Edit/Update", min_value=1, step=1
-      )
-      row_to_edit = df_trans[df_trans["id"] == edit_id]
-
-      if not row_to_edit.empty:
-        r = row_to_edit.iloc[0]
-        trans_date = pd.to_datetime(r["date"])
-        if trans_date.tzinfo is not None:
-          trans_date = trans_date.tz_localize(None)
-        hours_elapsed = (
-            pd.Timestamp.now() - trans_date
-        ).total_seconds() / 3600
-
-        can_edit = is_admin or (
-            hours_elapsed <= 24 or user.get("edit_override", False)
-        )
-        can_edit_notes = is_admin or user.get("note_override", False)
-
-        if not can_edit:
-          st.error(
-              "⚠️ Transaction older than 24 hours. Admin auth required."
-          )
-        else:
-          with st.form("edit_trans_form"):
-            new_amt = st.number_input(
-                "Update Amount (GHS)", value=float(r["amount"]), step=1.0
-            )
-            new_notes = st.text_area(
-                "Update Remarks/Notes",
-                value=str(r["notes"] if r["notes"] else ""),
-                disabled=not can_edit_notes,
-            )
-            if st.form_submit_button("Save Changes"):
-              with engine.begin() as conn:
-                if can_edit_notes:
-                  conn.execute(
-                      sqlalchemy.text(
-                          "UPDATE transactions SET amount = :amt, notes ="
-                          " :notes WHERE id = :id"
-                      ),
-                      {"amt": new_amt, "notes": new_notes, "id": edit_id},
-                  )
-                else:
-                  conn.execute(
-                      sqlalchemy.text(
-                          "UPDATE transactions SET amount = :amt WHERE id = :id"
-                      ),
-                      {"amt": new_amt, "id": edit_id},
-                  )
-              st.success("Transaction updated successfully!")
-              st.rerun()
     else:
       st.info("No transaction records found.")
 
-        # 5. TARGET LIMITS
+  # 5. TARGET LIMITS
   elif nav == "🎯 Client Target Limits":
     st.subheader("🎯 Client Target Limits")
     if is_admin:
@@ -974,125 +938,156 @@ def render_dashboard():
     else:
       st.info("No data available for export.")
 
-  # 7. REPORT ISSUE
+  # 7. REPORT ISSUE (MANAGER)
   elif nav == "🛠️ Report App Issue / Problem":
-    st.subheader("🛠️ Report App Issue to Developer")
+    st.subheader("🛠️ Report App Issue to Developer / Admin")
     with st.form("issue_form", clear_on_submit=True):
-      issue_msg = st.text_area("Describe the issue:")
+      issue_msg = st.text_area("Describe the issue or request support:")
       if st.form_submit_button("Submit Issue"):
         if issue_msg:
           with engine.begin() as conn:
             conn.execute(
                 sqlalchemy.text("""
-                            INSERT INTO support_tickets (manager_name, issue_message)
-                            VALUES (:m, :msg)
+                            INSERT INTO support_tickets (manager_name, issue_message, status)
+                            VALUES (:m, :msg, 'Pending')
                         """),
                 {"m": user["full_name"], "msg": issue_msg},
             )
-          st.success("Issue submitted successfully!")
+          st.success("Issue submitted successfully! Admin will review soon.")
         else:
           st.warning("Please describe the issue.")
 
-  # 8. ADMIN GOVERNANCE
+    st.markdown("---")
+    st.subheader("📬 Your Submitted Tickets & Admin Replies")
+    df_my_tickets = safe_read_sql(
+        "SELECT id, issue_message, admin_reply, status, date FROM"
+        " support_tickets WHERE manager_name = :m ORDER BY date DESC",
+        params={"m": user["full_name"]},
+    )
+    if not df_my_tickets.empty:
+      for _, t in df_my_tickets.iterrows():
+        st.markdown(
+            f"**Ticket #{t['id']}** ({t['date']}) - Status: `{t['status']}`"
+        )
+        st.markdown(f"*Your Issue:* {t['issue_message']}")
+        if t["admin_reply"]:
+          st.success(f"**Admin Reply:** {t['admin_reply']}")
+        else:
+          st.info("Waiting for admin reply...")
+        st.markdown("---")
+    else:
+      st.info("No support tickets submitted yet.")
+
+  # 8. ADMIN GOVERNANCE & ACCOUNT SUSPENSION / REMOVAL
   elif nav == "🛡️ [Admin] Manager Governance & Quotas":
     if not is_admin:
       st.error("Unauthorized access.")
       return
-    st.subheader("🛡️ Manager Governance & Audit Control")
-    df_m_count = safe_read_sql(
-        "SELECT COUNT(*) as total FROM users WHERE role != 'admin'"
-    )
-    total_mgrs = int(df_m_count.iloc[0]["total"]) if not df_m_count.empty else 0
-    st.metric(label="Total Active Managers on App", value=total_mgrs)
-    st.markdown("---")
+    st.subheader("🛡️ Manager Governance, Suspensions & Account Removal")
 
     df_managers = safe_read_sql(
-        "SELECT id, full_name, phone, client_quota, status, edit_override,"
-        " note_override FROM users WHERE role != 'admin'"
+        "SELECT id, full_name, phone, client_quota, status,"
+        " suspension_reason FROM users WHERE role != 'admin'"
     )
     if not df_managers.empty:
-      for idx, row in df_managers.iterrows():
+      for _, row in df_managers.iterrows():
         st.markdown(
-            f"**{row['full_name']}** ({row['phone']}) | Status: `{row['status']}`"
-            f" | Quota: `{row['client_quota']}`"
+            f"**{row['full_name']}** ({row['phone']}) | Status:"
+            f" `{row['status']}` | Quota: `{row['client_quota']}`"
         )
-        col1, col2, col3, col4 = st.columns(4)
+        if row["status"] == "Frozen" and row["suspension_reason"]:
+          st.markdown(
+              f"> *Suspension Reason:* `{row['suspension_reason']}`"
+          )
+
+        col1, col2, col3 = st.columns(3)
+
         if row["status"] == "Active":
-          if col1.button("Freeze", key=f"freeze_{row['id']}"):
-            with engine.begin() as conn:
-              conn.execute(
-                  sqlalchemy.text(
-                      "UPDATE users SET status = 'Frozen' WHERE id = :id"
-                  ),
-                  {"id": row["id"]},
-              )
-            st.rerun()
+          with col1.form(f"freeze_form_{row['id']}"):
+            reason = st.text_input(
+                "Suspension Reason / Message",
+                placeholder="Violation of policy...",
+            )
+            if st.form_submit_button("Suspend / Freeze Account"):
+              with engine.begin() as conn:
+                conn.execute(
+                    sqlalchemy.text(
+                        "UPDATE users SET status = 'Frozen',"
+                        " suspension_reason = :r WHERE id = :id"
+                    ),
+                    {"r": reason, "id": row["id"]},
+                )
+              st.success("Account suspended with message.")
+              st.rerun()
         else:
-          if col1.button("Unfreeze", key=f"unfreeze_{row['id']}"):
+          if col1.button("Unfreeze Account", key=f"unfreeze_{row['id']}"):
             with engine.begin() as conn:
               conn.execute(
                   sqlalchemy.text(
-                      "UPDATE users SET status = 'Active' WHERE id = :id"
+                      "UPDATE users SET status = 'Active', suspension_reason ="
+                      " '' WHERE id = :id"
                   ),
                   {"id": row["id"]},
               )
+            st.success("Account reactivated.")
             st.rerun()
 
-        if col2.button("Grant Edit Auth", key=f"edit_{row['id']}"):
+        if col2.button(
+            "🗑️ Remove Account & Data", key=f"del_mgr_{row['id']}"
+        ):
           with engine.begin() as conn:
             conn.execute(
-                sqlalchemy.text(
-                    "UPDATE users SET edit_override = TRUE WHERE id = :id"
-                ),
+                sqlalchemy.text("DELETE FROM users WHERE id = :id"),
                 {"id": row["id"]},
             )
+          st.warning("Manager account removed.")
           st.rerun()
 
-        if col3.button("Grant Note Auth", key=f"note_{row['id']}"):
-          with engine.begin() as conn:
-            conn.execute(
-                sqlalchemy.text(
-                    "UPDATE users SET note_override = TRUE WHERE id = :id"
-                ),
-                {"id": row["id"]},
-            )
-          st.rerun()
-
-        new_q = col4.number_input(
-            "Quota",
-            value=int(row["client_quota"]),
-            step=5,
-            key=f"q_{row['id']}",
-        )
-        if col4.button("Set Quota", key=f"set_q_{row['id']}"):
-          with engine.begin() as conn:
-            conn.execute(
-                sqlalchemy.text(
-                    "UPDATE users SET client_quota = :q WHERE id = :id"
-                ),
-                {"q": new_q, "id": row["id"]},
-            )
-          st.rerun()
         st.markdown("---")
+    else:
+      st.info("No workspace managers registered.")
 
-    st.subheader("📋 All Registered Clients Across All Workspaces")
-    df_all_clients = safe_read_sql(
-        "SELECT id, client_name, client_phone, gender, location,"
-        " manager_name, target_limit, date_registered FROM clients"
-    )
-    st.dataframe(df_all_clients, use_container_width=True)
-
-  # 9. SUPPORT TICKETS
+  # 9. ADMIN SUPPORT TICKETS & MESSAGING
   elif nav == "🛠️ App Issues & Support Tickets":
     if not is_admin:
       st.error("Unauthorized access.")
       return
-    st.subheader("🛠️ Manager Issue & Problem Reports")
+    st.subheader("🛠️ Manager Support Tickets & Messaging Reply Center")
+
     df_tickets = safe_read_sql(
-        "SELECT id, manager_name, issue_message, status, date FROM"
-        " support_tickets ORDER BY date DESC"
+        "SELECT id, manager_name, issue_message, admin_reply, status, date"
+        " FROM support_tickets ORDER BY date DESC"
     )
-    st.dataframe(df_tickets, use_container_width=True)
+    if not df_tickets.empty:
+      for _, t in df_tickets.iterrows():
+        st.markdown(
+            f"**Ticket #{t['id']}** | Manager: **{t['manager_name']}** |"
+            f" Status: `{t['status']}`"
+        )
+        st.markdown(f"**Issue:** {t['issue_message']}")
+
+        with st.form(f"reply_form_{t['id']}"):
+          reply_text = st.text_area(
+              "Reply to Manager",
+              value=str(t["admin_reply"] if t["admin_reply"] else ""),
+          )
+          c_r1, c_r2 = st.columns(2)
+          resolved = c_r1.checkbox("Mark as Resolved", value=t["status"] == "Resolved")
+          if c_r2.form_submit_button("Send Admin Reply"):
+            new_status = "Resolved" if resolved else "Pending"
+            with engine.begin() as conn:
+              conn.execute(
+                  sqlalchemy.text(
+                      "UPDATE support_tickets SET admin_reply = :r, status ="
+                      " :s WHERE id = :id"
+                  ),
+                  {"r": reply_text, "s": new_status, "id": t["id"]},
+              )
+            st.success("Reply sent to manager!")
+            st.rerun()
+        st.markdown("---")
+    else:
+      st.info("No support tickets or messages from managers.")
 
 
 # ---------------------------------------------------------
