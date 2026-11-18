@@ -67,7 +67,7 @@ st.markdown(
 
     <div class="developer-footer">
         <strong>🚀 AlufaTanaah Record Keeper</strong><br>
-        Developer: Rogers enterprises limited<br>
+        Developer: Roggers Enterprises Limited<br>
         📧 koffieroggers@gmail.com | Enchi
     </div>
     """,
@@ -76,7 +76,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# PDF RECEIPT GENERATOR WITH CUSTOM HEADER
+# PDF RECEIPT GENERATOR WITH CUSTOM HEADER & BRANDING
 # ---------------------------------------------------------
 def create_receipt_pdf(
     receipt_no,
@@ -93,7 +93,7 @@ def create_receipt_pdf(
   pdf.set_auto_page_break(auto=True, margin=10)
   pdf.add_page()
 
-  # Header (Uses Manager's Custom Company Header if set)
+  # Header (Uses Manager's Custom Company Header)
   pdf.set_fill_color(255, 75, 75)
   pdf.rect(0, 0, 105, 22, "F")
   pdf.set_text_color(255, 255, 255)
@@ -154,14 +154,15 @@ def create_receipt_pdf(
   pdf.multi_cell(89, 4, safe_notes)
 
   # Footer
-  pdf.set_y(-22)
+  pdf.set_y(-25)
   pdf.line(8, pdf.get_y(), 97, pdf.get_y())
   pdf.ln(2)
   pdf.set_font("Helvetica", "I", 8)
   pdf.set_text_color(100, 100, 100)
-  pdf.cell(0, 4, "Thank you for saving with us!", 0, 1, "C")
-  pdf.set_font("Helvetica", "", 7)
-  pdf.cell(0, 4, "Powered by Rogers Enterprises Limited | Enchi", 0, 1, "C")
+  pdf.cell(0, 4, "Thank you for working with us.", 0, 1, "C")
+  pdf.set_font("Helvetica", "B", 7)
+  pdf.set_text_color(50, 50, 50)
+  pdf.cell(0, 4, "Roggers Enterprises Limited", 0, 1, "C")
 
   return bytes(pdf.output())
 
@@ -635,7 +636,8 @@ def render_dashboard():
                 <p><b>Amount:</b> GHS {rec['amount']:,.2f}</p>
                 <p><b>Remarks:</b> {rec['notes'] if rec['notes'] else 'None'}</p>
                 <hr style="border: 0.5px dashed #ccc;">
-                <p style="text-align:center; font-size:11px;">Thank you for saving with us!</p>
+                <p style="text-align:center; font-size:11px; margin-bottom: 2px;">Thank you for working with us.</p>
+                <p style="text-align:center; font-size:9px; color:#666; font-weight:bold;">Roggers Enterprises Limited</p>
             </div>
             """
       st.markdown(receipt_html, unsafe_allow_html=True)
@@ -889,7 +891,7 @@ def render_dashboard():
     else:
       st.info("No transaction records found.")
 
-  # 5. TARGET LIMITS
+        # 5. TARGET LIMITS
   elif nav == "🎯 Client Target Limits":
     st.subheader("🎯 Client Target Limits")
     if is_admin:
@@ -933,7 +935,7 @@ def render_dashboard():
     else:
       st.info("No clients available.")
 
-        # 6. EXPORT
+  # 6. EXPORT
   elif nav == "📥 Export Encrypted Data (Excel/CSV)":
     st.subheader("📥 Export Transaction Records")
     if is_admin:
@@ -1066,7 +1068,7 @@ def render_dashboard():
   # 9. SUPPORT TICKETS
   elif nav == "🛠️ App Issues & Support Tickets":
     if not is_admin:
-      st.error("Unauthorized access radians")
+      st.error("Unauthorized access.")
       return
     st.subheader("🛠️ Manager Issue & Problem Reports")
     df_tickets = safe_read_sql(
