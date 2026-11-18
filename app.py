@@ -81,7 +81,7 @@ st.markdown(
 def create_receipt_pdf(
     receipt_no, date_str, client_name, client_id, manager_name, trans_type, amount, notes
 ):
-  pdf = FPDF(orientation="P", unit="mm", format=(105, 160))  # Mobile/A6 receipt size
+  pdf = FPDF(orientation="P", unit="mm", format=(105, 160))
   pdf.set_auto_page_break(auto=True, margin=10)
   pdf.add_page()
 
@@ -123,7 +123,6 @@ def create_receipt_pdf(
     pdf.set_font("Helvetica", "B", 9)
     pdf.cell(35, 6, label, 0, 0)
     pdf.set_font("Helvetica", "", 9)
-    # Clean non-latin1 characters to prevent FPDF encoding crashes
     safe_val = val.encode("latin-1", "replace").decode("latin-1")
     pdf.cell(54, 6, safe_val[:28], 0, 1, "R")
 
@@ -179,21 +178,17 @@ engine = get_sqlalchemy_engine()
 
 
 def safe_read_sql(query_str, params=None):
-  """Executes SELECT queries safely without crashing the UI on transient errors."""
   try:
     return pd.read_sql(sqlalchemy.text(query_str), engine, params=params)
-  except Exception as e:
-    st.warning(f"Notice: Refreshing data view ({e})")
+  except Exception:
     return pd.DataFrame()
 
 
 @st.cache_resource
 def init_db():
-  """Runs once per server boot to ensure all tables, columns, and data types match."""
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # 1. Base Tables Creation
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -254,12 +249,9 @@ def init_db():
         """)
     )
 
-    # 2. Automatic Column Addition & Type Healing
     schema_migrations = [
-        # Fix legacy integer IDs or default sequences on clients
         "ALTER TABLE clients ALTER COLUMN id DROP DEFAULT;",
         "ALTER TABLE clients ALTER COLUMN id TYPE TEXT USING id::TEXT;",
-        # Ensure all columns exist on users
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS client_quota INT DEFAULT 50;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS edit_override BOOLEAN DEFAULT FALSE;",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS note_override BOOLEAN DEFAULT FALSE;",
@@ -267,7 +259,6 @@ def init_db():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'manager';",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_pref TEXT DEFAULT 'Email';",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;",
-        # Ensure all columns & types exist on clients
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS manager_name TEXT;",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_phone TEXT;",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS gender TEXT;",
@@ -275,7 +266,6 @@ def init_db():
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS target_limit FLOAT DEFAULT 0.0;",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS date_registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
         "ALTER TABLE clients ALTER COLUMN target_limit TYPE DOUBLE PRECISION USING COALESCE(target_limit::DOUBLE PRECISION, 0.0);",
-        # Ensure all columns & types exist on transactions
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS manager_name TEXT;",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS client_name TEXT;",
         "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS client_id TEXT;",
@@ -292,7 +282,6 @@ def init_db():
       except Exception:
         pass
 
-    # 3. Guaranteed Force-Seed Admin Account
     conn.execute(
         sqlalchemy.text("""
             INSERT INTO users (full_name, phone, email, password, role, status, client_quota)
@@ -355,36 +344,46 @@ def render_auth():
 
   with tab2:
     st.subheader("Create Workspace Account")
-    reg_name = st.text_input("Full Name", key="reg_name_input").strip()
-    reg_phone = st.text_input("Phone Number", key="reg_phone_input").strip()
-    reg_email = st.text_input("Email (Optional)", key="reg_email_input").strip()
-    reg_pass = st.text_input("Password", type="password", key="reg_pass_input")
-    recovery_choice = st.radio(
-        "Recovery Channel:", ["Email", "Phone"], key="reg_rec_input"
-    )
+    with st.form("workspace_reg_form", clear_on_submit=True):
+      reg_name = st.text_input("Full Name").strip()
+      reg_phone = st.text_input("Phone Number").strip()
+      reg_email = st.text_input("Email Address (Optional)").strip()
+      reg_pass = st.text_input("Create Password", type="password")
+      recovery_choice = st.radio(
+          "Preferred Password Recovery Channel:", ["Email", "Phone"]
+      )
 
-    if st.button("Register Account"):
-      if reg_name and reg_phone and reg_pass:
-        try:
-          with engine.begin() as conn:
-            conn.execute(
-                sqlalchemy.text("""
-                            INSERT INTO users (full_name, phone, email, password, role, recovery_pref, client_quota)
-                            VALUES (:name, :phone, :email, :passwd, 'manager', :rec, 50)
-                        """),
-                {
-                    "name": reg_name,
-                    "phone": reg_phone,
-                    "email": reg_email,
-                    "passwd": reg_pass,
-                    "rec": recovery_choice,
-                },
+      submitted_reg = st.form_submit_button("Register Account")
+      if submitted_reg:
+        if reg_name and reg_phone and reg_pass:
+          try:
+            with engine.begin() as conn:
+              conn.execute(
+                  sqlalchemy.text("""
+                              INSERT INTO users (full_name, phone, email, password, role, recovery_pref, client_quota)
+                              VALUES (:name, :phone, :email, :passwd, 'manager', :rec, 50)
+                          """),
+                  {
+                      "name": reg_name,
+                      "phone": reg_phone,
+                      "email": reg_email,
+                      "passwd": reg_pass,
+                      "rec": recovery_choice,
+                  },
+              )
+            st.success(
+                "Registration successful! You can now sign in using the Login"
+                " tab."
             )
-          st.success("Registration successful! You can now log in.")
-        except Exception as e:
-          st.error(f"Could not register account (Phone may already exist): {e}")
-      else:
-        st.warning("Please fill in Name, Phone, and Password.")
+          except Exception as e:
+            st.error(
+                f"Error registering user: Phone number '{reg_phone}' may already"
+                f" be registered."
+            )
+        else:
+          st.warning(
+              "Please fill in Full Name, Phone Number, and Password fields."
+          )
 
   with tab3:
     st.subheader("Secure Password Reset")
@@ -424,8 +423,7 @@ def render_auth():
       else:
         st.warning("Please fill out all fields.")
 
-
-# ---------------------------------------------------------
+          # ---------------------------------------------------------
 # MAIN DASHBOARD
 # ---------------------------------------------------------
 def render_dashboard():
@@ -529,7 +527,6 @@ def render_dashboard():
       st.warning("⚠️ Please register at least one client first.")
       return
 
-    # Map display label "Client Name (CLI-XXXX)" -> (id, client_name)
     client_options = {
         f"{row['client_name']} ({row['id']})": (row["id"], row["client_name"])
         for _, row in df_clients.iterrows()
@@ -597,7 +594,6 @@ def render_dashboard():
           except Exception as e:
             st.error(f"Error saving transaction: {e}")
 
-    # Display Receipt Preview & Direct PDF Download Outside Form
     if st.session_state.last_receipt:
       rec = st.session_state.last_receipt
       receipt_html = f"""
@@ -627,7 +623,7 @@ def render_dashboard():
             use_container_width=True,
         )
 
-  # 3. MY CLIENTS & RECORDS (WITH INDIVIDUAL TRANSACTION SUMS & FILTERING)
+  # 3. MY CLIENTS & RECORDS
   elif nav == "📊 My Clients & Records":
     st.subheader("📊 Workspace Clients, Transaction Sums & Search Filtering")
 
@@ -654,10 +650,13 @@ def render_dashboard():
           params={"m": user["full_name"]},
       )
 
-    # Compute Individual Client Transaction Sums
     if not df_clients_all.empty:
       df_clients_summary = df_clients_all.copy()
-      if not df_trans.empty:
+      df_clients_summary["Total Deposits (GHS)"] = 0.0
+      df_clients_summary["Total Withdrawals (GHS)"] = 0.0
+      df_clients_summary["Net Balance (GHS)"] = 0.0
+
+      if not df_trans.empty and "client_name" in df_trans.columns:
         deposits = (
             df_trans[df_trans["trans_type"] == "Deposit"]
             .groupby("client_name")["amount"]
@@ -670,8 +669,16 @@ def render_dashboard():
             .sum()
             .reset_index(name="Total Withdrawals (GHS)")
         )
+        df_clients_summary = df_clients_summary.drop(
+            columns=[
+                "Total Deposits (GHS)",
+                "Total Withdrawals (GHS)",
+                "Net Balance (GHS)",
+            ],
+            errors="ignore",
+        )
         df_clients_summary = pd.merge(
-            df_clients_summary, deposits, on="client_name", how="left"
+            df_clients_all, deposits, on="client_name", how="left"
         )
         df_clients_summary = pd.merge(
             df_clients_summary, withdrawals, on="client_name", how="left"
@@ -686,10 +693,6 @@ def render_dashboard():
             df_clients_summary["Total Deposits (GHS)"]
             - df_clients_summary["Total Withdrawals (GHS)"]
         )
-      else:
-        df_clients_summary["Total Deposits (GHS)"] = 0.0
-        df_clients_summary["Total Withdrawals (GHS)"] = 0.0
-        df_clients_summary["Net Balance (GHS)"] = 0.0
 
       st.markdown("### 🔍 Search, Filter & Sort Clients")
       col_f1, col_f2 = st.columns([2, 1])
@@ -744,7 +747,6 @@ def render_dashboard():
             by="date_registered", ascending=False
         )
 
-      # Workspace Summary Metrics for Filtered View
       m1, m2, m3 = st.columns(3)
       m1.metric(
           "Filtered Deposits",
@@ -785,9 +787,12 @@ def render_dashboard():
       if not row_to_edit.empty:
         r = row_to_edit.iloc[0]
         trans_date = pd.to_datetime(r["date"])
+        if trans_date.tzinfo is not None:
+          trans_date = trans_date.tz_localize(None)
         hours_elapsed = (
-            pd.Timestamp.now() - trans_date.tz_localize(None)
+            pd.Timestamp.now() - trans_date
         ).total_seconds() / 3600
+
         can_edit = is_admin or (
             hours_elapsed <= 24 or user.get("edit_override", False)
         )
@@ -829,7 +834,7 @@ def render_dashboard():
     else:
       st.info("No transaction records found.")
 
-        # 4. TARGET LIMITS
+  # 4. TARGET LIMITS
   elif nav == "🎯 Client Target Limits":
     st.subheader("🎯 Client Target Limits")
     if is_admin:
@@ -873,7 +878,8 @@ def render_dashboard():
     else:
       st.info("No clients available.")
 
-  # 5. EXPORT
+
+        # 5. EXPORT
   elif nav == "📥 Export Encrypted Data (Excel/CSV)":
     st.subheader("📥 Export Transaction Records")
     if is_admin:
