@@ -110,7 +110,7 @@ def init_db():
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # Tables
+    # Tables Creation
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -170,7 +170,16 @@ def init_db():
         """)
     )
 
-    # Safe Column Migrations
+    # Safe Column Migrations & Type Fixes (Resolves integer vs text CLI- ID error)
+    try:
+      conn.execute(
+          sqlalchemy.text(
+              "ALTER TABLE clients ALTER COLUMN id TYPE TEXT USING id::TEXT;"
+          )
+      )
+    except Exception:
+      pass
+
     for col, typ in [
         ("client_quota", "INT DEFAULT 50"),
         ("edit_override", "BOOLEAN DEFAULT FALSE"),
@@ -221,18 +230,15 @@ def init_db():
       except Exception:
         pass
 
-    # Seed Admin
-    res = conn.execute(
-        sqlalchemy.text("SELECT COUNT(*) FROM users WHERE role = 'admin'")
-    ).fetchone()
-    if res[0] == 0:
-      conn.execute(
-          sqlalchemy.text("""
-                INSERT INTO users (full_name, phone, email, password, role, status, client_quota)
-                VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', 'admin123', 'admin', 'Active', 9999)
-                ON CONFLICT (phone) DO NOTHING;
-            """)
-      )
+    # Guaranteed Force-Seed Admin Account
+    conn.execute(
+        sqlalchemy.text("""
+            INSERT INTO users (full_name, phone, email, password, role, status, client_quota)
+            VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', 'admin123', 'admin', 'Active', 9999)
+            ON CONFLICT (phone) DO UPDATE 
+            SET password = 'admin123', role = 'admin', status = 'Active';
+        """)
+    )
 
 
 init_db()
@@ -369,7 +375,8 @@ def render_auth():
       else:
         st.warning("Please fill out all fields.")
 
-          # ---------------------------------------------------------
+
+# ---------------------------------------------------------
 # MAIN DASHBOARD
 # ---------------------------------------------------------
 def render_dashboard():
@@ -530,15 +537,25 @@ def render_dashboard():
             unsafe_allow_html=True,
         )
 
-  # 3. MY CLIENTS & RECORDS
+  # 3. MY CLIENTS & RECORDS (WITH INDIVIDUAL TRANSACTION SUMS & FILTERING)
   elif nav == "📊 My Clients & Records":
-    st.subheader("📊 Clients & Transaction Records")
-    st.markdown("### 🔍 Search Clients")
+    st.subheader(
+        "📊 Workspace Clients, Transaction Sums & Search Filtering"
+    )
+
+    # Fetch Clients & Transactions based on role
     if is_admin:
       df_clients_all = pd.read_sql(
           sqlalchemy.text(
               "SELECT id, manager_name, client_name, client_phone, gender,"
               " location, target_limit, date_registered FROM clients"
+          ),
+          engine,
+      )
+      df_trans = pd.read_sql(
+          sqlalchemy.text(
+              "SELECT id, manager_name, client_name, amount, trans_type, notes,"
+              " date FROM transactions ORDER BY date DESC"
           ),
           engine,
       )
@@ -552,36 +569,6 @@ def render_dashboard():
           engine,
           params={"m": user["full_name"]},
       )
-
-    search_query = st.text_input("🔎 Search by name, phone, location, or ID:")
-    if search_query:
-      mask = (
-          df_clients_all["client_name"]
-          .str.contains(search_query, case=False, na=False)
-          | df_clients_all["client_phone"]
-          .str.contains(search_query, case=False, na=False)
-          | df_clients_all["location"]
-          .str.contains(search_query, case=False, na=False)
-          | df_clients_all["id"]
-          .str.contains(search_query, case=False, na=False)
-      )
-      df_clients_filtered = df_clients_all[mask]
-    else:
-      df_clients_filtered = df_clients_all
-
-    st.dataframe(df_clients_filtered, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("📊 Transaction Records")
-    if is_admin:
-      df_trans = pd.read_sql(
-          sqlalchemy.text(
-              "SELECT id, manager_name, client_name, amount, trans_type, notes,"
-              " date FROM transactions ORDER BY date DESC"
-          ),
-          engine,
-      )
-    else:
       df_trans = pd.read_sql(
           sqlalchemy.text(
               "SELECT id, manager_name, client_name, amount, trans_type, notes,"
@@ -592,7 +579,71 @@ def render_dashboard():
           params={"m": user["full_name"]},
       )
 
-    trans_search = st.text_input("🔎 Search transactions by client name:")
+        # --- COMPUTE INDIVIDUAL CLIENT TRANSACTION TOTALS ---
+    if not df_clients_all.empty and not df_trans.empty:
+      # Calculate total deposits and withdrawals per client
+      deposits = (
+          df_trans[df_trans["trans_type"] == "Deposit"]
+          .groupby("client_name")["amount"]
+          .sum()
+          .reset_index(name="Total Deposits (GHS)")
+      )
+      withdrawals = (
+          df_trans[df_trans["trans_type"] == "Withdrawal"]
+          .groupby("client_name")["amount"]
+          .sum()
+          .reset_index(name="Total Withdrawals (GHS)")
+      )
+
+      df_clients_summary = pd.merge(
+          df_clients_all, deposits, on="client_name", how="left"
+      )
+      df_clients_summary = pd.merge(
+          df_clients_summary, withdrawals, on="client_name", how="left"
+      )
+      df_clients_summary["Total Deposits (GHS)"] = (
+          df_clients_summary["Total Deposits (GHS)"].fillna(0.0)
+      )
+      df_clients_summary["Total Withdrawals (GHS)"] = (
+          df_clients_summary["Total Withdrawals (GHS)"].fillna(0.0)
+      )
+      df_clients_summary["Net Balance (GHS)"] = (
+          df_clients_summary["Total Deposits (GHS)"]
+          - df_clients_summary["Total Withdrawals (GHS)"]
+      )
+    else:
+      df_clients_summary = df_clients_all.copy()
+      if not df_clients_summary.empty:
+        df_clients_summary["Total Deposits (GHS)"] = 0.0
+        df_clients_summary["Total Withdrawals (GHS)"] = 0.0
+        df_clients_summary["Net Balance (GHS)"] = 0.0
+
+    st.markdown("### 🔍 Search & Filter Clients with Transaction Summaries")
+    search_query = st.text_input(
+        "🔎 Search by client name, phone, location, or Unique ID:"
+    )
+    if search_query:
+      mask = (
+          df_clients_summary["client_name"]
+          .str.contains(search_query, case=False, na=False)
+          | df_clients_summary["client_phone"]
+          .str.contains(search_query, case=False, na=False)
+          | df_clients_summary["location"]
+          .str.contains(search_query, case=False, na=False)
+          | df_clients_summary["id"]
+          .str.contains(search_query, case=False, na=False)
+      )
+      df_clients_filtered = df_clients_summary[mask]
+    else:
+      df_clients_filtered = df_clients_summary
+
+    st.dataframe(df_clients_filtered, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📊 All Transaction Records & Filter")
+    trans_search = st.text_input(
+        "🔎 Search transaction records by client name:"
+    )
     if trans_search:
       df_trans = df_trans[
           df_trans["client_name"].str.contains(
