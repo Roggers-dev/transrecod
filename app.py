@@ -4,7 +4,7 @@ import sqlalchemy
 import streamlit as st
 
 # ---------------------------------------------------------
-# PAGE CONFIGURATION & MOBILE OPTIMIZATION
+# PAGE CONFIGURATION
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="AlufaTanaah Transaction Record Keeper",
@@ -13,11 +13,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Custom CSS for Bottom-Left Developer Footer, Mobile Performance, and Print Receipts
+# ---------------------------------------------------------
+# STYLING & DEVELOPER FOOTER
+# ---------------------------------------------------------
 st.markdown(
     """
     <style>
-    /* Fixed Bottom-Left Developer Header/Footer Styling */
     .developer-footer {
         position: fixed;
         bottom: 15px;
@@ -37,8 +38,6 @@ st.markdown(
         font-size: 12px;
         letter-spacing: 0.5px;
     }
-
-    /* Hide Streamlit header/sidebar elements during printing */
     @media print {
         header, footer, [data-testid="stSidebar"], .stButton, .stTextInput, .stSelectbox {
             display: none !important;
@@ -53,8 +52,6 @@ st.markdown(
             max-width: 100% !important;
         }
     }
-
-    /* Android Mobile Screen Sized Receipt */
     .receipt-container {
         max-width: 380px;
         margin: 20px auto;
@@ -91,7 +88,7 @@ st.markdown(
 
 
 # ---------------------------------------------------------
-# DATABASE CONNECTION & AUTOCOMMIT INITIALIZATION
+# DATABASE CONNECTION & SETUP
 # ---------------------------------------------------------
 def get_sqlalchemy_engine():
   try:
@@ -113,7 +110,7 @@ def init_db():
   with engine.connect() as conn:
     conn = conn.execution_options(isolation_level="AUTOCOMMIT")
 
-    # 1. Base Tables Creation
+    # Tables
     conn.execute(
         sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
@@ -173,8 +170,8 @@ def init_db():
         """)
     )
 
-    # 2. Robust Column Migration for Existing Tables
-    columns_users = [
+    # Safe Column Migrations
+    for col, typ in [
         ("client_quota", "INT DEFAULT 50"),
         ("edit_override", "BOOLEAN DEFAULT FALSE"),
         ("note_override", "BOOLEAN DEFAULT FALSE"),
@@ -182,55 +179,49 @@ def init_db():
         ("role", "TEXT DEFAULT 'manager'"),
         ("recovery_pref", "TEXT DEFAULT 'Email'"),
         ("email", "TEXT"),
-    ]
-    for col_name, col_type in columns_users:
+    ]:
       try:
         conn.execute(
             sqlalchemy.text(
-                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col_name}"
-                f" {col_type};"
+                f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {typ};"
             )
         )
       except Exception:
         pass
 
-    columns_clients = [
+    for col, typ in [
         ("gender", "TEXT"),
         ("location", "TEXT"),
         ("target_limit", "FLOAT DEFAULT 0.0"),
         ("client_phone", "TEXT"),
         ("manager_name", "TEXT"),
-    ]
-    for col_name, col_type in columns_clients:
+    ]:
       try:
         conn.execute(
             sqlalchemy.text(
-                f"ALTER TABLE clients ADD COLUMN IF NOT EXISTS {col_name}"
-                f" {col_type};"
+                f"ALTER TABLE clients ADD COLUMN IF NOT EXISTS {col} {typ};"
             )
         )
       except Exception:
         pass
 
-    columns_trans = [
+    for col, typ in [
         ("notes", "TEXT"),
         ("manager_name", "TEXT"),
         ("client_name", "TEXT"),
         ("amount", "FLOAT"),
         ("trans_type", "TEXT"),
-    ]
-    for col_name, col_type in columns_trans:
+    ]:
       try:
         conn.execute(
             sqlalchemy.text(
-                f"ALTER TABLE transactions ADD COLUMN IF NOT EXISTS {col_name}"
-                f" {col_type};"
+                f"ALTER TABLE transactions ADD COLUMN IF NOT EXISTS {col} {typ};"
             )
         )
       except Exception:
         pass
 
-    # 3. Seed Default System Admin Account
+    # Seed Admin
     res = conn.execute(
         sqlalchemy.text("SELECT COUNT(*) FROM users WHERE role = 'admin'")
     ).fetchone()
@@ -248,7 +239,7 @@ init_db()
 
 
 # ---------------------------------------------------------
-# AUTHENTICATION & SESSION MANAGEMENT
+# SESSION STATE
 # ---------------------------------------------------------
 if "logged_in" not in st.session_state:
   st.session_state.logged_in = False
@@ -267,13 +258,16 @@ def render_auth():
     login_pass = st.text_input("Password", type="password", key="login_pw")
 
     if st.button("Log In"):
-      query = sqlalchemy.text(
-          "SELECT id, full_name, phone, email, password, role, status,"
-          " client_quota, edit_override, note_override, recovery_pref FROM users"
-          " WHERE phone = :id OR email = :id"
-      )
       try:
-        df = pd.read_sql(query, engine, params={"id": login_phone})
+        df = pd.read_sql(
+            sqlalchemy.text(
+                "SELECT id, full_name, phone, email, password, role, status,"
+                " client_quota, edit_override, note_override, recovery_pref FROM"
+                " users WHERE phone = :id OR email = :id"
+            ),
+            engine,
+            params={"id": login_phone},
+        )
       except Exception:
         df = pd.read_sql(
             sqlalchemy.text(
@@ -291,7 +285,6 @@ def render_auth():
           if user["status"] == "Frozen":
             st.error(
                 "⚠️ Your account has been frozen by administration for audit."
-                " Contact support."
             )
           else:
             st.session_state.logged_in = True
@@ -305,20 +298,12 @@ def render_auth():
 
   with tab2:
     st.subheader("Create Workspace Account")
-    reg_name = st.text_input(
-        "Full Name (e.g., Kofi Mensah)", key="reg_name_input"
-    )
+    reg_name = st.text_input("Full Name", key="reg_name_input")
     reg_phone = st.text_input("Phone Number", key="reg_phone_input")
-    reg_email = st.text_input(
-        "Email Address (Optional)", key="reg_email_input"
-    )
-    reg_pass = st.text_input(
-        "Create Password", type="password", key="reg_pass_input"
-    )
+    reg_email = st.text_input("Email (Optional)", key="reg_email_input")
+    reg_pass = st.text_input("Password", type="password", key="reg_pass_input")
     recovery_choice = st.radio(
-        "Preferred Password Recovery Channel:",
-        ["Email", "Phone (SMS/WhatsApp)"],
-        key="reg_rec_input",
+        "Recovery Channel:", ["Email", "Phone"], key="reg_rec_input"
     )
 
     if st.button("Register Account"):
@@ -338,33 +323,21 @@ def render_auth():
                     "rec": recovery_choice,
                 },
             )
-          st.success(
-              "Registration successful! You can now log in and immediately"
-              " register clients."
-          )
+          st.success("Registration successful! You can now log in.")
           st.rerun()
         except Exception as e:
-          st.error(
-              f"Error registering user (Phone might already exist): {e}"
-          )
+          st.error(f"Error registering user: {e}")
       else:
-        st.warning("Please fill in Full Name, Phone Number, and Password.")
+        st.warning("Please fill in Name, Phone, and Password.")
 
   with tab3:
-    st.subheader("Secure Password Reset (Prevent Data Loss)")
-    st.info(
-        "Verify your account identifier (Phone or Email) to create a new"
-        " password for your existing account safely."
-    )
-
-    reset_id = st.text_input(
-        "Enter your registered Phone Number or Email", key="reset_id_input"
-    )
+    st.subheader("Secure Password Reset")
+    reset_id = st.text_input("Phone Number or Email", key="reset_id_input")
     new_pass = st.text_input(
-        "Create New Password", type="password", key="reset_new_pass"
+        "New Password", type="password", key="reset_new_pass"
     )
     confirm_pass = st.text_input(
-        "Confirm New Password", type="password", key="reset_confirm_pass"
+        "Confirm Password", type="password", key="reset_confirm_pass"
     )
 
     if st.button("Reset Password Securely"):
@@ -372,8 +345,7 @@ def render_auth():
         if new_pass == confirm_pass:
           df_check = pd.read_sql(
               sqlalchemy.text(
-                  "SELECT id, full_name FROM users WHERE phone = :id OR email ="
-                  " :id"
+                  "SELECT id FROM users WHERE phone = :id OR email = :id"
               ),
               engine,
               params={"id": reset_id},
@@ -388,22 +360,17 @@ def render_auth():
                   {"p": new_pass, "id": reset_id},
               )
             st.success(
-                "Password successfully updated! All your existing workspace"
-                " data remains fully intact. Please sign in using your new"
-                " password."
+                "Password successfully updated! Data remains fully intact."
             )
           else:
-            st.error(
-                "No matching user account found with that phone or email."
-            )
+            st.error("No matching user found.")
         else:
           st.error("Passwords do not match.")
       else:
         st.warning("Please fill out all fields.")
 
-
           # ---------------------------------------------------------
-# MAIN DASHBOARD (WORKSPACE + ADMIN PRIVILEGES)
+# MAIN DASHBOARD
 # ---------------------------------------------------------
 def render_dashboard():
   user = st.session_state.user
@@ -439,10 +406,9 @@ def render_dashboard():
     st.session_state.user = None
     st.rerun()
 
-  # --- SECTION 1: REGISTER CLIENT ---
+  # 1. REGISTER CLIENT
   if nav == "👥 Register Client":
     st.subheader("👥 Register New Client")
-
     if not is_admin:
       df_count = pd.read_sql(
           sqlalchemy.text(
@@ -454,12 +420,8 @@ def render_dashboard():
       current_count = df_count.iloc[0]["cnt"]
       quota = user["client_quota"]
       st.info(f"Quota Status: **{current_count} / {quota}** clients registered")
-
       if current_count >= quota:
-        st.error(
-            "⚠️ You have reached your client registration quota limit."
-            " Contact Admin to increase your quota."
-        )
+        st.error("⚠️ Quota limit reached. Contact Admin.")
         return
 
     with st.form("client_reg_form", clear_on_submit=True):
@@ -488,17 +450,15 @@ def render_dashboard():
                 },
             )
           st.success(
-              f"Client **{c_name}** successfully registered with Unique ID:"
-              f" `{unique_client_id}`!"
+              f"Client registered successfully! ID: `{unique_client_id}`"
           )
           st.rerun()
         except Exception as e:
           st.error(f"Error registering client: {e}")
 
-  # --- SECTION 2: RECORD TRANSACTION & RECEIPT ---
+  # 2. RECORD TRANSACTION & RECEIPT
   elif nav == "📥 Record Transaction & Receipts":
-    st.subheader("📥 Record Daily Transaction & Generate PDF/Print Receipt")
-
+    st.subheader("📥 Record Daily Transaction & Generate Receipt")
     if is_admin:
       df_clients = pd.read_sql(
           sqlalchemy.text("SELECT client_name FROM clients"), engine
@@ -515,11 +475,8 @@ def render_dashboard():
     client_list = (
         df_clients["client_name"].tolist() if not df_clients.empty else []
     )
-
     if not client_list:
-      st.warning(
-          "⚠️ Please register at least one client using 'Register Client' first."
-      )
+      st.warning("⚠️ Please register at least one client first.")
       return
 
     with st.form("trans_form", clear_on_submit=True):
@@ -562,7 +519,6 @@ def render_dashboard():
                 </div>
                 """
         st.markdown(receipt_html, unsafe_allow_html=True)
-
         st.markdown(
             """
                 <div style="max-width: 380px; margin: 10px auto; text-align: center;">
@@ -574,11 +530,10 @@ def render_dashboard():
             unsafe_allow_html=True,
         )
 
-  # --- SECTION 3: MY CLIENTS & RECORDS ---
+  # 3. MY CLIENTS & RECORDS
   elif nav == "📊 My Clients & Records":
-    st.subheader("📊 Clients & Transaction Records Search & Filtering")
-
-    st.markdown("### 🔍 Search & Filter Clients")
+    st.subheader("📊 Clients & Transaction Records")
+    st.markdown("### 🔍 Search Clients")
     if is_admin:
       df_clients_all = pd.read_sql(
           sqlalchemy.text(
@@ -598,9 +553,7 @@ def render_dashboard():
           params={"m": user["full_name"]},
       )
 
-    search_query = st.text_input(
-        "🔎 Search customers by name, phone, location, or Unique ID:"
-    )
+    search_query = st.text_input("🔎 Search by name, phone, location, or ID:")
     if search_query:
       mask = (
           df_clients_all["client_name"]
@@ -619,7 +572,7 @@ def render_dashboard():
     st.dataframe(df_clients_filtered, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📊 Transaction Records & Filter")
+    st.subheader("📊 Transaction Records")
     if is_admin:
       df_trans = pd.read_sql(
           sqlalchemy.text(
@@ -639,7 +592,7 @@ def render_dashboard():
           params={"m": user["full_name"]},
       )
 
-    trans_search = st.text_input("🔎 Search transaction records by client name:")
+    trans_search = st.text_input("🔎 Search transactions by client name:")
     if trans_search:
       df_trans = df_trans[
           df_trans["client_name"].str.contains(
@@ -649,14 +602,8 @@ def render_dashboard():
 
     if not df_trans.empty:
       st.dataframe(df_trans, use_container_width=True)
-
       st.markdown("---")
       st.subheader("🔒 Edit / Audit Controls (24-Hour Rule)")
-      st.info(
-          "Entries older than 24 hours or locked remarks cannot be edited"
-          " without Admin authorization."
-      )
-
       edit_id = st.number_input(
           "Enter Transaction ID to Edit/Update", min_value=1, step=1
       )
@@ -668,7 +615,6 @@ def render_dashboard():
         hours_elapsed = (
             pd.Timestamp.now() - trans_date.tz_localize(None)
         ).total_seconds() / 3600
-
         can_edit = is_admin or (
             hours_elapsed <= 24 or user.get("edit_override", False)
         )
@@ -676,8 +622,7 @@ def render_dashboard():
 
         if not can_edit:
           st.error(
-              "⚠️ This transaction is older than 24 hours and locked. Contact"
-              " Admin for authorization."
+              "⚠️ Transaction older than 24 hours. Admin auth required."
           )
         else:
           with st.form("edit_trans_form"):
@@ -689,12 +634,6 @@ def render_dashboard():
                 value=str(r["notes"] if r["notes"] else ""),
                 disabled=not can_edit_notes,
             )
-            if not can_edit_notes:
-              st.warning(
-                  "🔒 Notes/remarks are locked. Admin override is required to"
-                  " edit remarks."
-              )
-
             if st.form_submit_button("Save Changes"):
               with engine.begin() as conn:
                 if can_edit_notes:
@@ -717,10 +656,9 @@ def render_dashboard():
     else:
       st.info("No transaction records found.")
 
-  # --- SECTION 4: CLIENT TARGET LIMITS ---
+  # 4. TARGET LIMITS
   elif nav == "🎯 Client Target Limits":
-    st.subheader("🎯 Client Target Limits & Quotas")
-
+    st.subheader("🎯 Client Target Limits")
     if is_admin:
       df_clients = pd.read_sql(
           sqlalchemy.text(
@@ -740,21 +678,18 @@ def render_dashboard():
 
     if not df_clients.empty:
       st.dataframe(df_clients, use_container_width=True)
-
-      c_id_input = st.text_input(
-          "Enter Client Unique ID to Update Target Limit (e.g., CLI-XXXXXX)"
-      )
+      c_id_input = st.text_input("Enter Client Unique ID to Update Target Limit")
       if c_id_input:
         target_row = df_clients[df_clients["id"] == c_id_input]
         if not target_row.empty:
           tr = target_row.iloc[0]
           with st.form("target_form"):
             new_target = st.number_input(
-                f"Set New Target Limit for {tr['client_name']} (GHS)",
+                f"New Target for {tr['client_name']} (GHS)",
                 value=float(tr["target_limit"]),
                 step=10.0,
             )
-            if st.form_submit_button("Update Target Limit"):
+            if st.form_submit_button("Update Target"):
               with engine.begin() as conn:
                 conn.execute(
                     sqlalchemy.text(
@@ -767,16 +702,11 @@ def render_dashboard():
         else:
           st.error("Client Unique ID not found.")
     else:
-      st.info("No clients available to set target limits.")
+      st.info("No clients available.")
 
-  # --- SECTION 5: EXPORT ENCRYPTED DATA (EXCEL/CSV) ---
+  # 5. EXPORT
   elif nav == "📥 Export Encrypted Data (Excel/CSV)":
-    st.subheader("📥 Export Active Transaction Records")
-    st.info(
-        "Download your active workspace transaction records in encrypted or"
-        " standard CSV/Excel format."
-    )
-
+    st.subheader("📥 Export Transaction Records")
     if is_admin:
       df_export = pd.read_sql(
           sqlalchemy.text("SELECT * FROM transactions"), engine
@@ -793,7 +723,7 @@ def render_dashboard():
     if not df_export.empty:
       csv_data = df_export.to_csv(index=False).encode("utf-8")
       st.download_button(
-          label="📥 Download Encrypted/Standard CSV File",
+          label="📥 Download CSV File",
           data=csv_data,
           file_name="alufatanaah_transactions_export.csv",
           mime="text/csv",
@@ -801,18 +731,11 @@ def render_dashboard():
     else:
       st.info("No data available for export.")
 
-  # --- SECTION 6: REPORT APP ISSUE / SUPPORT TICKETS ---
+  # 6. REPORT ISSUE
   elif nav == "🛠️ Report App Issue / Problem":
-    st.subheader("🛠️ Report App Issues or Problems to Developer")
-    st.info(
-        "Use this channel to report any problems or challenges you are facing"
-        " with the application."
-    )
-
+    st.subheader("🛠️ Report App Issue to Developer")
     with st.form("issue_form", clear_on_submit=True):
-      issue_msg = st.text_area(
-          "Describe the issue or problem you are encountering:"
-      )
+      issue_msg = st.text_area("Describe the issue:")
       if st.form_submit_button("Submit Issue"):
         if issue_msg:
           with engine.begin() as conn:
@@ -823,28 +746,27 @@ def render_dashboard():
                         """),
                 {"m": user["full_name"], "msg": issue_msg},
             )
-          st.success(
-              "Issue submitted successfully! Developer/Admin will review it."
-          )
+          st.success("Issue submitted successfully!")
           st.rerun()
         else:
           st.warning("Please describe the issue.")
 
-  # --- SECTION 7: ADMIN - MANAGER GOVERNANCE & QUOTAS ---
+  # 7. ADMIN GOVERNANCE
   elif nav == "🛡️ [Admin] Manager Governance & Quotas":
     if not is_admin:
       st.error("Unauthorized access.")
       return
-    st.subheader("🛡️ Workspace Manager Governance & Audit Control")
-
+    st.subheader("🛡️ Manager Governance & Audit Control")
     df_m_count = pd.read_sql(
         sqlalchemy.text(
             "SELECT COUNT(*) as total FROM users WHERE role != 'admin'"
         ),
         engine,
     )
-    total_managers = df_m_count.iloc[0]["total"]
-    st.metric(label="Total Active Managers on App", value=total_managers)
+    st.metric(
+        label="Total Active Managers on App",
+        value=df_m_count.iloc[0]["total"],
+    )
     st.markdown("---")
 
     df_managers = pd.read_sql(
@@ -854,17 +776,13 @@ def render_dashboard():
         ),
         engine,
     )
-
     if not df_managers.empty:
       for idx, row in df_managers.iterrows():
         st.markdown(
             f"**{row['full_name']}** ({row['phone']}) | Status: `{row['status']}`"
-            f" | Quota: `{row['client_quota']}` | Edit Override: "
-            f"`{row['edit_override']}` | Note Override: `{row['note_override']}`"
+            f" | Quota: `{row['client_quota']}`"
         )
-
         col1, col2, col3, col4 = st.columns(4)
-
         if row["status"] == "Active":
           if col1.button("Freeze", key=f"freeze_{row['id']}"):
             with engine.begin() as conn:
@@ -874,7 +792,6 @@ def render_dashboard():
                   ),
                   {"id": row["id"]},
               )
-            st.warning(f"Account {row['full_name']} frozen for audit.")
             st.rerun()
         else:
           if col1.button("Unfreeze", key=f"unfreeze_{row['id']}"):
@@ -885,7 +802,6 @@ def render_dashboard():
                   ),
                   {"id": row["id"]},
               )
-            st.success(f"Account {row['full_name']} restored.")
             st.rerun()
 
         if col2.button("Grant Edit Auth", key=f"edit_{row['id']}"):
@@ -896,7 +812,6 @@ def render_dashboard():
                 ),
                 {"id": row["id"]},
             )
-          st.success(f"Edit authorization granted to {row['full_name']}.")
           st.rerun()
 
         if col3.button("Grant Note Auth", key=f"note_{row['id']}"):
@@ -907,7 +822,6 @@ def render_dashboard():
                 ),
                 {"id": row["id"]},
             )
-          st.success(f"Note editing authorization granted to {row['full_name']}.")
           st.rerun()
 
         new_q = col4.number_input(
@@ -924,11 +838,8 @@ def render_dashboard():
                 ),
                 {"q": new_q, "id": row["id"]},
             )
-          st.success(f"Quota updated to {new_q} for {row['full_name']}.")
           st.rerun()
         st.markdown("---")
-    else:
-      st.info("No workspace managers registered.")
 
     st.subheader("📋 All Registered Clients Across All Workspaces")
     df_all_clients = pd.read_sql(
@@ -938,18 +849,14 @@ def render_dashboard():
         ),
         engine,
     )
-    if not df_all_clients.empty:
-      st.dataframe(df_all_clients, use_container_width=True)
-    else:
-      st.info("No clients registered in the system yet.")
+    st.dataframe(df_all_clients, use_container_width=True)
 
-  # --- SECTION 8: ADMIN - SUPPORT TICKETS / ISSUES ---
+  # 8. SUPPORT TICKETS
   elif nav == "🛠️ App Issues & Support Tickets":
     if not is_admin:
       st.error("Unauthorized access.")
       return
     st.subheader("🛠️ Manager Issue & Problem Reports")
-
     df_tickets = pd.read_sql(
         sqlalchemy.text(
             "SELECT id, manager_name, issue_message, status, date FROM"
@@ -957,12 +864,13 @@ def render_dashboard():
         ),
         engine,
     )
-    if not df_tickets.empty:
-      st.dataframe(df_tickets, use_container_width=True)
-    else:
-      st.info("No issues reported by managers.")
+    st.dataframe(df_tickets, use_container_width=True)
 
 
 # ---------------------------------------------------------
-# MAIN APP ROUTER
-# -------------------------------------------------
+# ROUTER
+# ---------------------------------------------------------
+if not st.session_state.logged_in:
+  render_auth()
+else:
+  render_dashboard()
