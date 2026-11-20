@@ -604,6 +604,67 @@ def _replace_local_database(sql_dump, remote_timestamp):
         """), {"ts": remote_timestamp})
 
 
+def _local_has_records_missing_from_snapshot(sql_dump):
+    """Return True if restoring this cloud snapshot would remove local accounts or records.
+
+    Admin rows are excluded because the configured admin is safely re-created
+    after restore. Manager rows and every manager/business table are protected.
+    Matching ignores SQLite autoincrement IDs but compares the remaining fields.
+    """
+    temp_path = LOCAL_DB_PATH.with_suffix(".safety-check.tmp")
+    if temp_path.exists():
+        temp_path.unlink()
+    cloud_db = sqlite3.connect(str(temp_path))
+    local_db = sqlite3.connect(str(LOCAL_DB_PATH))
+    try:
+        cloud_db.executescript(sql_dump)
+        cloud_tables = {
+            row[0] for row in cloud_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        local_tables = {
+            row[0] for row in local_db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        protected_tables = (local_tables - {"sync_meta", "sqlite_sequence"})
+        for table in protected_tables:
+            local_info = local_db.execute(f'PRAGMA table_info("{table}")').fetchall()
+            local_columns = [r[1] for r in local_info if r[1] != "id"]
+            if not local_columns:
+                continue
+            if table not in cloud_tables:
+                local_count = local_db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+                if local_count:
+                    return True
+                continue
+            cloud_column_names = {
+                r[1] for r in cloud_db.execute(f'PRAGMA table_info("{table}")').fetchall()
+            }
+            common = [c for c in local_columns if c in cloud_column_names]
+            if not common:
+                continue
+            quoted = ", ".join('"' + c.replace('"', '""') + '"' for c in common)
+            local_rows = local_db.execute(f'SELECT {quoted} FROM "{table}"').fetchall()
+            cloud_rows = cloud_db.execute(f'SELECT {quoted} FROM "{table}"').fetchall()
+            if table == "users" and "role" in common:
+                role_index = common.index("role")
+                local_rows = [r for r in local_rows if str(r[role_index] or "manager") != "admin"]
+                cloud_rows = [r for r in cloud_rows if str(r[role_index] or "manager") != "admin"]
+            from collections import Counter
+            cloud_counts = Counter(cloud_rows)
+            local_counts = Counter(local_rows)
+            if any(count > cloud_counts[row] for row, count in local_counts.items()):
+                return True
+        return False
+    finally:
+        local_db.close()
+        cloud_db.close()
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def sync_local_and_cloud():
     """Best-effort single-installation snapshot sync. Runs on each app rerun."""
     remote = get_remote_engine()
@@ -681,8 +742,20 @@ def sync_local_and_cloud():
                 else:
                     cloud_dump = None
             elif cloud_updated != last_remote:
-                _replace_local_database(cloud_dump, cloud_updated)
-                return "Online — cloud changes downloaded to this device."
+                # Never replace local data with an older/incomplete cloud snapshot.
+                # If any locally registered manager or business record is absent
+                # from the snapshot, keep the local copy and publish it instead.
+                if _local_has_records_missing_from_snapshot(cloud_dump):
+                    with engine.begin() as conn:
+                        conn.execute(sqlalchemy.text("""
+                            UPDATE sync_meta
+                            SET local_modified=:ts
+                            WHERE id=1
+                        """), {"ts": datetime.utcnow().isoformat(timespec="microseconds") + "Z"})
+                    cloud_dump = None
+                else:
+                    _replace_local_database(cloud_dump, cloud_updated)
+                    return "Online — cloud changes downloaded to this device."
 
         # Push local snapshot if it is new or changed.
         with engine.connect() as conn:
@@ -762,6 +835,33 @@ def verify_password(stored, supplied):
 
 init_db()
 SYNC_STATUS = sync_local_and_cloud()
+
+# Ensure a configured administrator still exists AFTER cloud snapshot restore.
+# A restored snapshot may not contain the locally seeded first admin account.
+def ensure_configured_admin():
+    configured_admin_password = os.getenv("ALUFATANAAH_ADMIN_PASSWORD")
+    try:
+        configured_admin_password = (
+            configured_admin_password or st.secrets.get("admin", {}).get("password")
+        )
+    except Exception:
+        pass
+    if not configured_admin_password:
+        return
+    with engine.begin() as conn:
+        existing_admin = conn.execute(sqlalchemy.text(
+            "SELECT id FROM users WHERE role = 'admin' LIMIT 1"
+        )).first()
+        if not existing_admin:
+            conn.execute(sqlalchemy.text("""
+                INSERT INTO users (full_name, phone, email, password, role, status,
+                                   client_quota, company_header)
+                VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', :pw,
+                        'admin', 'Active', 9999, 'AlufaTanaah Record Keeper')
+            """), {"pw": hash_password(configured_admin_password)})
+
+ensure_configured_admin()
+
 try:
     from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=60000, key="alufatanaah_cloud_sync_refresh")
@@ -1967,6 +2067,42 @@ def render_dashboard():
     m3.metric("Frozen Managers", frozen_managers)
     m4.metric("Total Registered Clients", total_registered_clients)
     m5.metric("Total Client Quota", total_allocated_quota)
+
+    # Aggregate client registrations by manager. This deliberately exposes
+    # counts only; it does not show client names, contacts, or transactions.
+    st.markdown("---")
+    st.subheader("👥 Registered Clients Under Each Manager")
+    if not df_managers.empty:
+      manager_client_summary = df_managers[[
+          "full_name", "phone", "status", "client_quota"
+      ]].copy()
+      manager_client_summary["Total Registered Clients"] = (
+          manager_client_summary["full_name"].map(count_map).fillna(0).astype(int)
+      )
+      manager_client_summary = manager_client_summary.rename(columns={
+          "full_name": "Manager",
+          "phone": "Phone",
+          "status": "Account Status",
+          "client_quota": "Client Quota",
+      })
+      manager_client_summary = manager_client_summary[[
+          "Manager", "Phone", "Account Status",
+          "Total Registered Clients", "Client Quota"
+      ]].sort_values(
+          by=["Total Registered Clients", "Manager"],
+          ascending=[False, True],
+      )
+      st.dataframe(
+          manager_client_summary,
+          use_container_width=True,
+          hide_index=True,
+      )
+      st.caption(
+          "Counts are grouped by manager. This summary does not expose "
+          "individual client records or transaction details."
+      )
+    else:
+      st.info("No managers have signed up yet.")
 
     st.markdown("---")
     st.subheader("📢 Workspace Broadcast Notice")
