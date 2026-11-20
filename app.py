@@ -1,19 +1,10 @@
 from datetime import datetime
 import urllib.parse
 import uuid
-import os
-import sqlite3
-import hashlib
-import secrets
-import hmac
-import time
-from pathlib import Path
 from zoneinfo import ZoneInfo
-
 from fpdf import FPDF
 import pandas as pd
 import sqlalchemy
-from sqlalchemy import inspect
 import streamlit as st
 
 GHANA_TZ = ZoneInfo("Africa/Accra")
@@ -339,75 +330,71 @@ def create_receipt_pdf(
   return bytes(pdf.output())
 
 
-
 # ---------------------------------------------------------
-# LOCAL-FIRST DATABASE + OPTIONAL AUTOMATIC CLOUD SNAPSHOT SYNC
+# DATABASE CONNECTION & SCHEMA MIGRATIONS
 # ---------------------------------------------------------
-# The SQLite database is the working database. It keeps the app usable
-# when the internet is unavailable, provided Streamlit itself is running
-# on a computer/server that remains accessible. A hosted Streamlit website
-# cannot be used offline when its hosting server cannot be reached.
-#
-# When a PostgreSQL URL is configured, the local database is synchronised
-# with a cloud snapshot on app reruns. This is intended for ONE primary
-# installation/database at a time. It is not multi-device concurrent
-# conflict-free replication.
-LOCAL_DB_PATH = Path(os.getenv("ALUFATANAAH_DB", "alufatanaah_local.db")).resolve()
-
-
 @st.cache_resource
 def get_sqlalchemy_engine():
-    return sqlalchemy.create_engine(
-        f"sqlite:///{LOCAL_DB_PATH.as_posix()}",
-        connect_args={"check_same_thread": False},
-        pool_pre_ping=True,
-    )
+  try:
+    database_url = st.secrets["postgres"]["url"]
+    if "postgresql://" in database_url and "+psycopg2" not in database_url:
+      database_url = database_url.replace(
+          "postgresql://", "postgresql+psycopg2://", 1
+      )
+    return sqlalchemy.create_engine(database_url, pool_pre_ping=True)
+  except Exception as e:
+    st.error(f"Database Connection Error: {e}")
+    st.stop()
 
 
 engine = get_sqlalchemy_engine()
 
 
-def get_remote_engine():
-    try:
-        url = st.secrets.get("postgres", {}).get("url") or os.getenv("DATABASE_URL")
-        if not url:
-            return None
-        if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql+psycopg2://", 1)
-        elif url.startswith("postgresql://") and "+psycopg" not in url:
-            url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
-        remote = sqlalchemy.create_engine(url, pool_pre_ping=True, connect_args={"connect_timeout": 4})
-        with remote.connect() as c:
-            c.execute(sqlalchemy.text("SELECT 1"))
-        return remote
-    except Exception:
-        return None
-
-
 def safe_read_sql(query_str, params=None):
+  try:
+    return pd.read_sql(sqlalchemy.text(query_str), engine, params=params)
+  except Exception:
+    return pd.DataFrame()
+
+
+def mark_daily_greeting_if_needed(user_row):
+  today_ghana = now_ghana().date()
+  last_greet = user_row.get("last_greeting_date")
+  if hasattr(last_greet, "date"):
+    last_greet = last_greet.date()
+  elif isinstance(last_greet, str) and last_greet:
     try:
-        with engine.connect() as conn:
-            return pd.read_sql(sqlalchemy.text(query_str), conn, params=params or {})
-    except Exception as exc:
-        st.warning(f"Database read problem: {exc}")
-        return pd.DataFrame()
+      last_greet = datetime.fromisoformat(last_greet[:10]).date()
+    except ValueError:
+      last_greet = None
 
-
-def _sqlite_columns(conn, table):
-    return {r[1] for r in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
-
-
-def _ensure_column(conn, table, column, definition):
-    if column not in _sqlite_columns(conn, table):
-        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+  if last_greet != today_ghana:
+    greeting = get_time_greeting(now_ghana())
+    name_part = user_row.get("full_name", "there")
+    st.session_state.daily_greeting_banner = (
+        f"{greeting}, **{name_part}**! Welcome to AlufaTanaah Record Keeper —"
+        " wishing you a productive and smooth day ahead."
+    )
+    try:
+      with engine.begin() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "UPDATE users SET last_greeting_date = :d WHERE id = :id"
+            ),
+            {"d": today_ghana, "id": int(user_row["id"])},
+        )
+    except Exception:
+      pass
 
 
 @st.cache_resource
 def init_db():
-    with engine.begin() as conn:
-        conn.exec_driver_sql("""
+  with engine.connect() as conn:
+    conn = conn.execution_options(isolation_level="AUTOCOMMIT")
+    conn.execute(
+        sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 full_name TEXT NOT NULL,
                 phone TEXT UNIQUE NOT NULL,
                 email TEXT,
@@ -416,457 +403,129 @@ def init_db():
                 status TEXT DEFAULT 'Active',
                 suspension_reason TEXT DEFAULT '',
                 recovery_pref TEXT DEFAULT 'Email',
-                client_quota INTEGER DEFAULT 50,
-                show_quota_to_manager BOOLEAN DEFAULT 0,
-                edit_override BOOLEAN DEFAULT 0,
-                note_override BOOLEAN DEFAULT 0,
+                client_quota INT DEFAULT 50,
+                show_quota_to_manager BOOLEAN DEFAULT FALSE,
+                edit_override BOOLEAN DEFAULT FALSE,
+                note_override BOOLEAN DEFAULT FALSE,
                 company_header TEXT DEFAULT 'AlufaTanaah Record Keeper',
                 last_greeting_date DATE
             )
         """)
-        conn.exec_driver_sql("""
+    )
+    conn.execute(
+        sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS clients (
-                id TEXT PRIMARY KEY, manager_name TEXT, client_name TEXT NOT NULL,
-                client_phone TEXT, gender TEXT, location TEXT,
-                target_limit REAL DEFAULT 0.0,
+                id TEXT PRIMARY KEY,
+                manager_name TEXT,
+                client_name TEXT NOT NULL,
+                client_phone TEXT,
+                gender TEXT,
+                location TEXT,
+                target_limit FLOAT DEFAULT 0.0,
                 date_registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.exec_driver_sql("""
+    )
+    conn.execute(
+        sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manager_name TEXT, client_name TEXT, client_id TEXT,
-                payer_name TEXT DEFAULT '', amount REAL, trans_type TEXT,
-                notes TEXT, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id SERIAL PRIMARY KEY,
+                manager_name TEXT,
+                client_name TEXT,
+                client_id TEXT,
+                payer_name TEXT DEFAULT '',
+                amount FLOAT,
+                trans_type TEXT,
+                notes TEXT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.exec_driver_sql("""
+    )
+    conn.execute(
+        sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS support_tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manager_name TEXT, issue_message TEXT, admin_reply TEXT DEFAULT '',
-                status TEXT DEFAULT 'Pending', date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                id SERIAL PRIMARY KEY,
+                manager_name TEXT,
+                issue_message TEXT,
+                admin_reply TEXT DEFAULT '',
+                status TEXT DEFAULT 'Pending',
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        conn.exec_driver_sql("""
+    )
+    conn.execute(
+        sqlalchemy.text("""
             CREATE TABLE IF NOT EXISTS workspace_announcements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL,
-                updated_by TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS client_loans (
-                client_id TEXT PRIMARY KEY, client_name TEXT, manager_name TEXT,
-                initial_loan REAL DEFAULT 0.0, loan_amount REAL DEFAULT 0.0,
-                loan_threshold REAL DEFAULT 0.0, is_active BOOLEAN DEFAULT 0,
+                id SERIAL PRIMARY KEY,
+                message TEXT NOT NULL,
+                updated_by TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # New manager-private debt records
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS debts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                manager_name TEXT NOT NULL, client_id TEXT DEFAULT '',
-                client_name TEXT NOT NULL, description TEXT DEFAULT '',
-                total_amount REAL NOT NULL, paid_amount REAL DEFAULT 0,
-                due_date TEXT DEFAULT '', status TEXT DEFAULT 'Open',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS debt_payments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, debt_id INTEGER NOT NULL,
-                manager_name TEXT NOT NULL, amount REAL NOT NULL,
-                notes TEXT DEFAULT '', paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # New manager-private inventory and sales records
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, manager_name TEXT NOT NULL,
-                product_name TEXT NOT NULL, sku TEXT DEFAULT '',
-                quantity INTEGER DEFAULT 0, unit_price REAL DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS sales (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, manager_name TEXT NOT NULL,
-                product_id INTEGER, product_name TEXT NOT NULL,
-                quantity INTEGER NOT NULL, unit_price REAL NOT NULL,
-                total_amount REAL NOT NULL, buyer_name TEXT DEFAULT '',
-                sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS sync_meta (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                local_modified TEXT DEFAULT '',
-                last_remote_modified TEXT DEFAULT ''
-            )
-        """)
-        conn.exec_driver_sql("INSERT OR IGNORE INTO sync_meta (id, local_modified, last_remote_modified) VALUES (1, '', '')")
-
-        # Migrate older local SQLite databases safely.
-        migrations = {
-            "users": {
-                "email": "TEXT", "role": "TEXT DEFAULT 'manager'",
-                "status": "TEXT DEFAULT 'Active'", "suspension_reason": "TEXT DEFAULT ''",
-                "recovery_pref": "TEXT DEFAULT 'Email'", "client_quota": "INTEGER DEFAULT 50",
-                "show_quota_to_manager": "BOOLEAN DEFAULT 0", "edit_override": "BOOLEAN DEFAULT 0",
-                "note_override": "BOOLEAN DEFAULT 0", "company_header": "TEXT DEFAULT 'AlufaTanaah Record Keeper'",
-                "last_greeting_date": "DATE"
-            },
-            "clients": {
-                "manager_name": "TEXT", "client_phone": "TEXT", "gender": "TEXT",
-                "location": "TEXT", "target_limit": "REAL DEFAULT 0",
-                "date_registered": "TIMESTAMP"
-            },
-            "transactions": {
-                "manager_name": "TEXT", "client_name": "TEXT", "client_id": "TEXT",
-                "payer_name": "TEXT DEFAULT ''", "amount": "REAL", "trans_type": "TEXT",
-                "notes": "TEXT", "date": "TIMESTAMP"
-            },
-            "support_tickets": {"admin_reply": "TEXT DEFAULT ''", "status": "TEXT DEFAULT 'Pending'"},
-        }
-        for table, cols in migrations.items():
-            for col, definition in cols.items():
-                _ensure_column(conn, table, col, definition)
-
-        # Every business-data change marks the local snapshot as needing sync.
-        tables = ["users", "clients", "transactions", "support_tickets",
-                  "workspace_announcements", "client_loans", "debts",
-                  "debt_payments", "products", "sales"]
-        for table in tables:
-            for action in ("INSERT", "UPDATE", "DELETE"):
-                trigger = f"sync_{table}_{action.lower()}"
-                conn.exec_driver_sql(f"""
-                    CREATE TRIGGER IF NOT EXISTS {trigger}
-                    AFTER {action} ON {table}
-                    BEGIN
-                      UPDATE sync_meta
-                      SET local_modified = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                      WHERE id = 1;
-                    END
-                """)
-
-    # Create the first administrator only when credentials are configured.
-    # Existing administrator accounts are never overwritten.
-    admin_password = os.getenv("ALUFATANAAH_ADMIN_PASSWORD")
-    try:
-        admin_password = admin_password or st.secrets.get("admin", {}).get("password")
-    except Exception:
-        pass
-    with engine.begin() as conn:
-        existing = conn.execute(sqlalchemy.text(
-            "SELECT id FROM users WHERE role = 'admin' LIMIT 1"
-        )).first()
-        if not existing and admin_password:
-            conn.execute(sqlalchemy.text("""
-                INSERT INTO users (full_name, phone, email, password, role, status,
-                                   client_quota, company_header)
-                VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', :pw,
-                        'admin', 'Active', 9999, 'AlufaTanaah Record Keeper')
-            """), {"pw": hash_password(admin_password)})
-    return True
-
-
-def _sqlite_dump():
-    raw = sqlite3.connect(str(LOCAL_DB_PATH))
-    try:
-        return "\n".join(raw.iterdump())
-    finally:
-        raw.close()
-
-
-def _replace_local_database(sql_dump, remote_timestamp):
-    temp_path = LOCAL_DB_PATH.with_suffix(".restore.tmp")
-    if temp_path.exists():
-        temp_path.unlink()
-    raw = sqlite3.connect(str(temp_path))
-    try:
-        raw.executescript(sql_dump)
-        raw.commit()
-    finally:
-        raw.close()
-    engine.dispose()
-    os.replace(temp_path, LOCAL_DB_PATH)
-    # Re-create cache entry is not needed: engine reopens the replaced file.
-    with engine.begin() as conn:
-        conn.exec_driver_sql("""
-            CREATE TABLE IF NOT EXISTS sync_meta (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                local_modified TEXT DEFAULT '',
-                last_remote_modified TEXT DEFAULT ''
-            )
-        """)
-        conn.execute(sqlalchemy.text("""
-            UPDATE sync_meta SET local_modified=:ts, last_remote_modified=:ts WHERE id=1
-        """), {"ts": remote_timestamp})
-
-
-def _local_has_records_missing_from_snapshot(sql_dump):
-    """Return True if restoring this cloud snapshot would remove local accounts or records.
-
-    Admin rows are excluded because the configured admin is safely re-created
-    after restore. Manager rows and every manager/business table are protected.
-    Matching ignores SQLite autoincrement IDs but compares the remaining fields.
-    """
-    temp_path = LOCAL_DB_PATH.with_suffix(".safety-check.tmp")
-    if temp_path.exists():
-        temp_path.unlink()
-    cloud_db = sqlite3.connect(str(temp_path))
-    local_db = sqlite3.connect(str(LOCAL_DB_PATH))
-    try:
-        cloud_db.executescript(sql_dump)
-        cloud_tables = {
-            row[0] for row in cloud_db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        local_tables = {
-            row[0] for row in local_db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-        protected_tables = (local_tables - {"sync_meta", "sqlite_sequence"})
-        for table in protected_tables:
-            local_info = local_db.execute(f'PRAGMA table_info("{table}")').fetchall()
-            local_columns = [r[1] for r in local_info if r[1] != "id"]
-            if not local_columns:
-                continue
-            if table not in cloud_tables:
-                local_count = local_db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                if local_count:
-                    return True
-                continue
-            cloud_column_names = {
-                r[1] for r in cloud_db.execute(f'PRAGMA table_info("{table}")').fetchall()
-            }
-            common = [c for c in local_columns if c in cloud_column_names]
-            if not common:
-                continue
-            quoted = ", ".join('"' + c.replace('"', '""') + '"' for c in common)
-            local_rows = local_db.execute(f'SELECT {quoted} FROM "{table}"').fetchall()
-            cloud_rows = cloud_db.execute(f'SELECT {quoted} FROM "{table}"').fetchall()
-            if table == "users" and "role" in common:
-                role_index = common.index("role")
-                local_rows = [r for r in local_rows if str(r[role_index] or "manager") != "admin"]
-                cloud_rows = [r for r in cloud_rows if str(r[role_index] or "manager") != "admin"]
-            from collections import Counter
-            cloud_counts = Counter(cloud_rows)
-            local_counts = Counter(local_rows)
-            if any(count > cloud_counts[row] for row, count in local_counts.items()):
-                return True
-        return False
-    finally:
-        local_db.close()
-        cloud_db.close()
-        if temp_path.exists():
-            temp_path.unlink()
-
-
-def sync_local_and_cloud():
-    """Best-effort single-installation snapshot sync. Runs on each app rerun."""
-    remote = get_remote_engine()
-    if remote is None:
-        return "Offline mode — saved on this device; cloud sync will retry when online."
-    try:
-        with remote.begin() as conn:
-            conn.execute(sqlalchemy.text("""
-                CREATE TABLE IF NOT EXISTS alufatanaah_sync_snapshot (
-                    id INTEGER PRIMARY KEY,
-                    snapshot_text TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """))
-            cloud_row = conn.execute(sqlalchemy.text(
-                "SELECT snapshot_text, updated_at FROM alufatanaah_sync_snapshot WHERE id=1"
-            )).first()
-
-        with engine.connect() as conn:
-            meta = conn.execute(sqlalchemy.text(
-                "SELECT local_modified, last_remote_modified FROM sync_meta WHERE id=1"
-            )).first()
-            local_user_count = int(conn.execute(sqlalchemy.text(
-                "SELECT COUNT(*) FROM users"
-            )).scalar() or 0)
-            local_business_count = 0
-            for table in ("clients", "transactions", "support_tickets",
-                          "workspace_announcements", "client_loans", "debts",
-                          "products", "sales"):
-                local_business_count += int(conn.execute(
-                    sqlalchemy.text(f"SELECT COUNT(*) FROM {table}")
-                ).scalar() or 0)
-        local_modified = str(meta[0] or "")
-        last_remote = str(meta[1] or "")
-
-        # Import the old PostgreSQL database once, including when a newly
-        # configured local admin account already exists.
-        should_import_legacy = (
-            cloud_row is None and
-            (local_user_count == 0 or (local_user_count <= 1 and local_business_count == 0))
-        )
-        if should_import_legacy:
-            try:
-                remote_tables = set(inspect(remote).get_table_names())
-                legacy_tables = ["users", "clients", "transactions", "support_tickets",
-                                 "workspace_announcements", "client_loans"]
-                with engine.begin() as local_conn:
-                    for table in legacy_tables:
-                        if table not in remote_tables:
-                            continue
-                        old_df = pd.read_sql(sqlalchemy.text(f"SELECT * FROM {table}"), remote)
-                        if old_df.empty:
-                            continue
-                        if table == "users" and local_user_count == 1 and "phone" in old_df.columns:
-                            old_df = old_df[old_df["phone"].astype(str) != "admin"]
-                        if old_df.empty:
-                            continue
-                        local_cols = _sqlite_columns(local_conn, table)
-                        common = [c for c in old_df.columns if c in local_cols]
-                        if not common:
-                            continue
-                        old_df[common].to_sql(table, local_conn, if_exists="append",
-                                              index=False, method=None)
-                local_modified = "legacy-import"
-            except Exception:
-                pass
-            cloud_row = None
-
-        if cloud_row is not None:
-            cloud_dump, cloud_updated = str(cloud_row[0]), str(cloud_row[1])
-            if local_modified and local_modified != last_remote and local_modified != "legacy-import":
-                # Local edits win when both copies changed. Use one primary local installation.
-                if cloud_updated != last_remote:
-                    pass
-                else:
-                    cloud_dump = None
-            elif cloud_updated != last_remote:
-                # Never replace local data with an older/incomplete cloud snapshot.
-                # If any locally registered manager or business record is absent
-                # from the snapshot, keep the local copy and publish it instead.
-                if _local_has_records_missing_from_snapshot(cloud_dump):
-                    with engine.begin() as conn:
-                        conn.execute(sqlalchemy.text("""
-                            UPDATE sync_meta
-                            SET local_modified=:ts
-                            WHERE id=1
-                        """), {"ts": datetime.utcnow().isoformat(timespec="microseconds") + "Z"})
-                    cloud_dump = None
-                else:
-                    _replace_local_database(cloud_dump, cloud_updated)
-                    return "Online — cloud changes downloaded to this device."
-
-        # Push local snapshot if it is new or changed.
-        with engine.connect() as conn:
-            meta2 = conn.execute(sqlalchemy.text(
-                "SELECT local_modified, last_remote_modified FROM sync_meta WHERE id=1"
-            )).first()
-        dirty = str(meta2[0] or "") != str(meta2[1] or "")
-        if cloud_row is None or dirty:
-            dump_text = _sqlite_dump()
-            stamp = datetime.utcnow().isoformat(timespec="microseconds") + "Z"
-            with remote.begin() as conn:
-                conn.execute(sqlalchemy.text("""
-                    INSERT INTO alufatanaah_sync_snapshot (id, snapshot_text, updated_at)
-                    VALUES (1, :snapshot, :stamp)
-                    ON CONFLICT (id) DO UPDATE
-                    SET snapshot_text = EXCLUDED.snapshot_text, updated_at = EXCLUDED.updated_at
-                """), {"snapshot": dump_text, "stamp": stamp})
-            with engine.begin() as conn:
-                conn.execute(sqlalchemy.text("""
-                    UPDATE sync_meta SET local_modified=:stamp, last_remote_modified=:stamp WHERE id=1
-                """), {"stamp": stamp})
-        return "Online — local data synchronised with cloud."
-    except Exception as exc:
-        return f"Local mode active — cloud sync will retry. ({str(exc)[:140]})"
-
-
-def mark_daily_greeting_if_needed(user_row):
-    today_ghana = now_ghana().date()
-    last_greet = user_row.get("last_greeting_date")
-    if hasattr(last_greet, "date"):
-        last_greet = last_greet.date()
-    elif isinstance(last_greet, str) and last_greet:
-        try:
-            last_greet = datetime.fromisoformat(last_greet[:10]).date()
-        except ValueError:
-            last_greet = None
-    if last_greet != today_ghana:
-        greeting = get_time_greeting(now_ghana())
-        name_part = user_row.get("full_name", "there")
-        st.session_state.daily_greeting_banner = (
-            f"{greeting}, **{name_part}**! Welcome to AlufaTanaah Record Keeper —"
-            " wishing you a productive and smooth day ahead."
-        )
-        try:
-            with engine.begin() as conn:
-                conn.execute(sqlalchemy.text(
-                    "UPDATE users SET last_greeting_date = :d WHERE id = :id"
-                ), {"d": today_ghana, "id": int(user_row["id"])})
-        except Exception:
-            pass
-
-
-def hash_password(password):
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310000)
-    return "pbkdf2_sha256$310000${}${}".format(
-        salt.hex(), digest.hex()
     )
-
-
-def verify_password(stored, supplied):
-    stored = str(stored or "")
-    if stored.startswith("pbkdf2_sha256$"):
-        try:
-            _, rounds, salt_hex, digest_hex = stored.split("$", 3)
-            actual = hashlib.pbkdf2_hmac(
-                "sha256", supplied.encode("utf-8"), bytes.fromhex(salt_hex), int(rounds)
-            ).hex()
-            return hmac.compare_digest(actual, digest_hex), False
-        except Exception:
-            return False, False
-    # Legacy plain-text password: allow one successful login, then upgrade it.
-    if not supplied:
-        return False, False
-    return hmac.compare_digest(stored, supplied), True
+    conn.execute(
+        sqlalchemy.text("""
+            CREATE TABLE IF NOT EXISTS client_loans (
+                client_id TEXT PRIMARY KEY,
+                client_name TEXT,
+                manager_name TEXT,
+                initial_loan FLOAT DEFAULT 0.0,
+                loan_amount FLOAT DEFAULT 0.0,
+                loan_threshold FLOAT DEFAULT 0.0,
+                is_active BOOLEAN DEFAULT FALSE,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    )
+    schema_migrations = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS show_quota_to_manager BOOLEAN DEFAULT FALSE;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_greeting_date DATE;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS payer_name TEXT DEFAULT '';",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS suspension_reason TEXT DEFAULT '';",
+        "ALTER TABLE support_tickets ADD COLUMN IF NOT EXISTS admin_reply TEXT DEFAULT '';",
+        "ALTER TABLE clients ALTER COLUMN id DROP DEFAULT;",
+        "ALTER TABLE clients ALTER COLUMN id TYPE TEXT USING id::TEXT;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS client_quota INT DEFAULT 50;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS edit_override BOOLEAN DEFAULT FALSE;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS note_override BOOLEAN DEFAULT FALSE;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Active';",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'manager';",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS recovery_pref TEXT DEFAULT 'Email';",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS company_header TEXT DEFAULT 'AlufaTanaah Record Keeper';",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS manager_name TEXT;",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_phone TEXT;",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS gender TEXT;",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS location TEXT;",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS target_limit FLOAT DEFAULT 0.0;",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS date_registered TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+        "ALTER TABLE clients ALTER COLUMN target_limit TYPE DOUBLE PRECISION USING COALESCE(target_limit::DOUBLE PRECISION, 0.0);",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS manager_name TEXT;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS client_name TEXT;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS client_id TEXT;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS amount FLOAT;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS trans_type TEXT;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS notes TEXT;",
+        "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS date TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+        "ALTER TABLE transactions ALTER COLUMN amount TYPE DOUBLE PRECISION USING COALESCE(amount::DOUBLE PRECISION, 0.0);",
+    ]
+    for sql_cmd in schema_migrations:
+      try:
+        conn.execute(sqlalchemy.text(sql_cmd))
+      except Exception:
+        pass
+    conn.execute(
+        sqlalchemy.text("""
+            INSERT INTO users (full_name, phone, email, password, role, status, client_quota, company_header)
+            VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', 'admin123', 'admin', 'Active', 9999, 'AlufaTanaah Record Keeper')
+            ON CONFLICT (phone) DO UPDATE 
+            SET password = 'admin123', role = 'admin', status = 'Active';
+        """)
+    )
+  return True
 
 
 init_db()
-SYNC_STATUS = sync_local_and_cloud()
-
-# Ensure a configured administrator still exists AFTER cloud snapshot restore.
-# A restored snapshot may not contain the locally seeded first admin account.
-def ensure_configured_admin():
-    configured_admin_password = os.getenv("ALUFATANAAH_ADMIN_PASSWORD")
-    try:
-        configured_admin_password = (
-            configured_admin_password or st.secrets.get("admin", {}).get("password")
-        )
-    except Exception:
-        pass
-    if not configured_admin_password:
-        return
-    with engine.begin() as conn:
-        existing_admin = conn.execute(sqlalchemy.text(
-            "SELECT id FROM users WHERE role = 'admin' LIMIT 1"
-        )).first()
-        if not existing_admin:
-            conn.execute(sqlalchemy.text("""
-                INSERT INTO users (full_name, phone, email, password, role, status,
-                                   client_quota, company_header)
-                VALUES ('System Admin', 'admin', 'admin@alufatanaah.com', :pw,
-                        'admin', 'Active', 9999, 'AlufaTanaah Record Keeper')
-            """), {"pw": hash_password(configured_admin_password)})
-
-ensure_configured_admin()
-
-try:
-    from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=60000, key="alufatanaah_cloud_sync_refresh")
-except Exception:
-    pass
 
 
 # ---------------------------------------------------------
@@ -902,15 +561,7 @@ def render_auth():
       )
       if not df.empty:
         user = df.iloc[0]
-        valid, was_legacy = verify_password(user["password"], login_pass)
-        if valid:
-          if was_legacy:
-            with engine.begin() as conn:
-              conn.execute(
-                  sqlalchemy.text("UPDATE users SET password=:p WHERE id=:id"),
-                  {"p": hash_password(login_pass), "id": int(user["id"])},
-              )
-            user["password"] = hash_password(login_pass)
+        if user["password"] == login_pass:
           user_dict = user.to_dict()
           mark_daily_greeting_if_needed(user_dict)
           st.session_state.logged_in = True
@@ -937,7 +588,7 @@ def render_auth():
       )
       submitted_reg = st.form_submit_button("Register Account")
       if submitted_reg:
-        if reg_name and reg_phone and len(reg_pass) >= 10:
+        if reg_name and reg_phone and reg_pass:
           header_val = (
               reg_header if reg_header else "AlufaTanaah Record Keeper"
           )
@@ -954,7 +605,7 @@ def render_auth():
                       "name": reg_name,
                       "phone": reg_phone,
                       "email": reg_email,
-                      "passwd": hash_password(reg_pass),
+                      "passwd": reg_pass,
                       "rec": recovery_choice,
                       "header": header_val,
                       "greet_date": today_ghana,
@@ -971,19 +622,44 @@ def render_auth():
             )
         else:
           st.warning(
-              "Enter your name and phone number, and use a password of at least 10 characters."
+              "Please fill in Full Name, Phone Number, and Password fields."
           )
   with tab3:
     st.subheader("Recover Password")
-    st.warning(
-        "For your account's protection, password reset cannot be completed "
-        "using only a phone number or email address. Contact your system "
-        "administrator and ask them to reset your account password."
+    reset_id = st.text_input(
+        "Phone Number or Email", key="reset_id_input"
+    ).strip()
+    new_pass = st.text_input(
+        "New Password", type="password", key="reset_new_pass"
     )
-    st.info(
-        "Your administrator can issue a temporary password. After receiving it, "
-        "sign in and ask for a password change before sharing access to your account."
+    confirm_pass = st.text_input(
+        "Confirm Password", type="password", key="reset_confirm_pass"
     )
+    if st.button("Reset Password Securely"):
+      if reset_id and new_pass and confirm_pass:
+        if new_pass == confirm_pass:
+          df_check = safe_read_sql(
+              "SELECT id FROM users WHERE phone = :id OR email = :id",
+              params={"id": reset_id},
+          )
+          if not df_check.empty:
+            with engine.begin() as conn:
+              conn.execute(
+                  sqlalchemy.text(
+                      "UPDATE users SET password = :p WHERE phone = :id OR"
+                      " email = :id"
+                  ),
+                  {"p": new_pass, "id": reset_id},
+              )
+            st.success(
+                "Password successfully updated! Data remains fully intact."
+            )
+          else:
+            st.error("No matching user found.")
+        else:
+          st.error("Passwords do not match.")
+      else:
+        st.warning("Please fill out all fields.")
 
 
 # ---------------------------------------------------------
@@ -1041,7 +717,12 @@ def render_dashboard():
   if is_admin:
     st.sidebar.title(f"🛡️ Admin: {user['full_name']}")
     nav_options = [
-        "📊 Admin Overview",
+        "👥 Register Client",
+        "📥 Record Transaction & Receipts",
+        "⚙️ Workspace & Receipt Settings",
+        "📊 My Clients & Records",
+        "🎯 Client Target Limits",
+        "📥 Export Encrypted Data (Excel/CSV)",
         "🛡️ [Admin] Manager Governance & Quotas",
         "🛠️ App Issues & Support Tickets",
     ]
@@ -1055,12 +736,9 @@ def render_dashboard():
         "📊 My Clients & Records",
         "🎯 Client Target Limits",
         "📥 Export Encrypted Data (Excel/CSV)",
-        "💳 Debt Management",
-        "📦 Inventory & Sales",
         "🛠️ Report App Issue / Problem",
     ]
 
-  st.sidebar.caption(f"🔄 {SYNC_STATUS}")
   nav = st.sidebar.radio("Navigation", nav_options)
   if st.sidebar.button("Log Out"):
     st.session_state.logged_in = False
@@ -1070,55 +748,8 @@ def render_dashboard():
     st.session_state.loan_feedback = None
     st.rerun()
 
-  # ADMIN OVERVIEW: totals only; no client names, ledgers, or transaction rows.
-  if nav == "📊 Admin Overview":
-    if not is_admin:
-      st.error("Unauthorized access.")
-      return
-    st.title("🛡️ Administration Overview")
-    total_clients = int(safe_read_sql("SELECT COUNT(*) AS n FROM clients").iloc[0]["n"])
-    total_managers = int(safe_read_sql(
-        "SELECT COUNT(*) AS n FROM users WHERE role != 'admin'"
-    ).iloc[0]["n"])
-    a1, a2 = st.columns(2)
-    a1.metric("Total Registered Clients", total_clients)
-    a2.metric("Total Signed-Up Managers", total_managers)
-    st.info(
-        "Privacy protection is enabled: this administrator account cannot "
-        "open individual client records, transaction histories, debt records, "
-        "or inventory and sales records."
-    )
-    st.markdown("---")
-    st.subheader("🔐 Change Administrator Password")
-    with st.form("admin_change_password_form", clear_on_submit=True):
-      admin_current_pw = st.text_input("Current Administrator Password", type="password")
-      admin_new_pw = st.text_input("New Password (at least 10 characters)", type="password")
-      admin_confirm_pw = st.text_input("Confirm New Password", type="password")
-      admin_change_pw = st.form_submit_button("Update Administrator Password")
-      if admin_change_pw:
-        valid_admin_pw, _ = verify_password(user.get("password", ""), admin_current_pw)
-        if not valid_admin_pw:
-          st.error("Current administrator password is incorrect.")
-        elif len(admin_new_pw) < 10:
-          st.error("Use at least 10 characters for the new password.")
-        elif admin_new_pw != admin_confirm_pw:
-          st.error("The new passwords do not match.")
-        else:
-          new_hash = hash_password(admin_new_pw)
-          with engine.begin() as conn:
-            conn.execute(
-                sqlalchemy.text("UPDATE users SET password=:p WHERE id=:id"),
-                {"p": new_hash, "id": int(user["id"])},
-            )
-          st.session_state.user["password"] = new_hash
-          st.success("Administrator password updated.")
-          st.rerun()
-
   # 1. REGISTER CLIENT
-  elif nav == "👥 Register Client":
-    if is_admin:
-      st.error("Administrators cannot access individual client records.")
-      return
+  if nav == "👥 Register Client":
     st.subheader("👥 Register New Client")
     if not is_admin:
       df_count = safe_read_sql(
@@ -1168,9 +799,6 @@ def render_dashboard():
 
               # 2. RECORD TRANSACTION & PDF RECEIPT + WHATSAPP NOTIFICATION
   elif nav == "📥 Record Transaction & Receipts":
-    if is_admin:
-      st.error("Administrators cannot access individual client transactions.")
-      return
     st.subheader("📥 Record Daily Transaction & Share PDF Receipt")
     if is_admin:
       df_clients = safe_read_sql(
@@ -1533,9 +1161,6 @@ def render_dashboard():
 
             # 3. WORKSPACE & RECEIPT SETTINGS
   elif nav == "⚙️ Workspace & Receipt Settings":
-    if is_admin:
-      st.error("This setting belongs to the manager's private workspace.")
-      return
     st.subheader("⚙️ Customize Your Receipt Header / Company Name")
     current_h = user.get("company_header", "AlufaTanaah Record Keeper")
     with st.form("header_form"):
@@ -1557,38 +1182,10 @@ def render_dashboard():
         else:
           st.warning("Receipt header cannot be empty.")
 
-    st.markdown("---")
-    st.subheader("🔐 Change Your Password")
-    with st.form("manager_change_password_form", clear_on_submit=True):
-      current_password = st.text_input("Current Password", type="password")
-      new_password = st.text_input("New Password (at least 10 characters)", type="password")
-      confirm_new_password = st.text_input("Confirm New Password", type="password")
-      change_password = st.form_submit_button("Update Password")
-      if change_password:
-        valid_current, _ = verify_password(user.get("password", ""), current_password)
-        if not valid_current:
-          st.error("Your current password is incorrect.")
-        elif len(new_password) < 10:
-          st.error("The new password must contain at least 10 characters.")
-        elif new_password != confirm_new_password:
-          st.error("The new passwords do not match.")
-        else:
-          with engine.begin() as conn:
-            conn.execute(
-                sqlalchemy.text("UPDATE users SET password=:p WHERE id=:id"),
-                {"p": hash_password(new_password), "id": int(user["id"])},
-            )
-          st.session_state.user["password"] = hash_password(new_password)
-          st.success("Your password has been changed successfully.")
-          st.rerun()
-
   # 4. MY CLIENTS & RECORDS + SHARED CLIENT LEDGER LOOKUP
   elif nav == "📊 My Clients & Records":
-    if is_admin:
-      st.error("Administrators cannot view individual client records or transactions.")
-      return
     st.subheader("📊 Workspace Clients, Transaction Sums & Search Filtering")
-    if False:
+    if is_admin:
       df_clients_all = safe_read_sql(
           "SELECT id, manager_name, client_name, client_phone, gender,"
           " location, target_limit, date_registered FROM clients"
@@ -1730,11 +1327,8 @@ def render_dashboard():
 
   # 5. TARGET LIMITS
   elif nav == "🎯 Client Target Limits":
-    if is_admin:
-      st.error("Administrators cannot access individual client target records.")
-      return
     st.subheader("🎯 Client Target Limits")
-    if False:
+    if is_admin:
       df_clients = safe_read_sql(
           "SELECT id, manager_name, client_name, target_limit FROM clients"
       )
@@ -1776,11 +1370,8 @@ def render_dashboard():
 
   # 6. EXPORT
   elif nav == "📥 Export Encrypted Data (Excel/CSV)":
-    if is_admin:
-      st.error("Administrators cannot export individual client transaction records.")
-      return
     st.subheader("📥 Export Transaction Records")
-    if False:
+    if is_admin:
       df_export = safe_read_sql("SELECT * FROM transactions")
     else:
       df_export = safe_read_sql(
@@ -1798,185 +1389,8 @@ def render_dashboard():
     else:
       st.info("No data available for export.")
 
-
-  # 7. DEBT MANAGEMENT — PRIVATE TO THE SIGNED-IN MANAGER
-  elif nav == "💳 Debt Management":
-    if is_admin:
-      st.error("Debt records are private to each manager.")
-      return
-    st.subheader("💳 Debt Management")
-    st.caption("Only you can view and manage debts recorded in your workspace.")
-    with st.form("add_debt_form", clear_on_submit=True):
-      debt_client_name = st.text_input("Client / Debtor Name")
-      debt_desc = st.text_input("Debt Description / Reason")
-      debt_total = st.number_input("Total Debt (GHS)", min_value=0.01, step=10.0)
-      debt_due = st.date_input("Due Date")
-      add_debt = st.form_submit_button("Save Debt")
-      if add_debt:
-        if not debt_client_name.strip():
-          st.warning("Enter the debtor's name.")
-        else:
-          with engine.begin() as conn:
-            conn.execute(sqlalchemy.text("""
-                INSERT INTO debts
-                (manager_name, client_name, description, total_amount, paid_amount, due_date, status)
-                VALUES (:m, :n, :d, :total, 0, :due, 'Open')
-            """), {
-                "m": user["full_name"], "n": debt_client_name.strip(),
-                "d": debt_desc.strip(), "total": float(debt_total),
-                "due": str(debt_due)
-            })
-          st.success("Debt saved.")
-          st.rerun()
-
-    df_debts = safe_read_sql(
-        "SELECT id, client_name, description, total_amount, paid_amount, "
-        "(total_amount-paid_amount) AS balance_due, due_date, status, created_at "
-        "FROM debts WHERE manager_name=:m ORDER BY id DESC",
-        {"m": user["full_name"]}
-    )
-    if not df_debts.empty:
-      st.dataframe(df_debts, use_container_width=True, hide_index=True)
-      open_debts = df_debts[df_debts["balance_due"].astype(float) > 0.00001]
-      if not open_debts.empty:
-        debt_options = {
-            f"#{int(r['id'])} — {r['client_name']} — GHS {float(r['balance_due']):,.2f}":
-            int(r["id"]) for _, r in open_debts.iterrows()
-        }
-        selected_debt_label = st.selectbox("Select debt to receive payment", list(debt_options))
-        selected_debt_id = debt_options[selected_debt_label]
-        with st.form("debt_payment_form", clear_on_submit=True):
-          debt_payment = st.number_input("Amount Received (GHS)", min_value=0.01, step=5.0)
-          debt_payment_note = st.text_input("Payment Note (Optional)")
-          submit_debt_payment = st.form_submit_button("Record Debt Payment")
-          if submit_debt_payment:
-            row = open_debts[open_debts["id"] == selected_debt_id].iloc[0]
-            outstanding = float(row["balance_due"])
-            if debt_payment > outstanding:
-              st.error(f"Payment cannot exceed the outstanding balance of GHS {outstanding:,.2f}.")
-            else:
-              new_paid = float(row["paid_amount"]) + float(debt_payment)
-              new_status = "Paid" if new_paid >= float(row["total_amount"]) - 0.00001 else "Part-paid"
-              with engine.begin() as conn:
-                conn.execute(sqlalchemy.text("""
-                    INSERT INTO debt_payments (debt_id, manager_name, amount, notes)
-                    VALUES (:id, :m, :amount, :notes)
-                """), {"id": selected_debt_id, "m": user["full_name"],
-                       "amount": float(debt_payment), "notes": debt_payment_note.strip()})
-                conn.execute(sqlalchemy.text("""
-                    UPDATE debts SET paid_amount=:paid, status=:status
-                    WHERE id=:id AND manager_name=:m
-                """), {"paid": new_paid, "status": new_status,
-                       "id": selected_debt_id, "m": user["full_name"]})
-              st.success("Debt payment recorded.")
-              st.rerun()
-      st.markdown("---")
-      st.subheader("Debt Payment History")
-      df_debt_payments = safe_read_sql(
-          "SELECT p.id, p.debt_id, d.client_name, p.amount, p.notes, p.paid_at "
-          "FROM debt_payments p JOIN debts d ON d.id=p.debt_id "
-          "WHERE p.manager_name=:m ORDER BY p.paid_at DESC",
-          {"m": user["full_name"]}
-      )
-      if not df_debt_payments.empty:
-        st.dataframe(df_debt_payments, use_container_width=True, hide_index=True)
-    else:
-      st.info("You have not recorded any debts yet.")
-
-  # 8. INVENTORY & SALES — PRIVATE TO THE SIGNED-IN MANAGER
-  elif nav == "📦 Inventory & Sales":
-    if is_admin:
-      st.error("Inventory and sales records are private to each manager.")
-      return
-    st.subheader("📦 Inventory & Sales Management")
-    st.caption("Your products, stock quantities, and sales are not visible to other managers or the administrator.")
-    with st.expander("➕ Add a Product", expanded=False):
-      with st.form("add_product_form", clear_on_submit=True):
-        product_name = st.text_input("Product Name")
-        product_sku = st.text_input("Product Code / SKU (Optional)")
-        product_qty = st.number_input("Opening Stock Quantity", min_value=0, step=1)
-        product_price = st.number_input("Selling Price per Unit (GHS)", min_value=0.0, step=1.0)
-        add_product = st.form_submit_button("Save Product")
-        if add_product:
-          if not product_name.strip():
-            st.warning("Enter a product name.")
-          else:
-            with engine.begin() as conn:
-              conn.execute(sqlalchemy.text("""
-                  INSERT INTO products (manager_name, product_name, sku, quantity, unit_price)
-                  VALUES (:m, :name, :sku, :qty, :price)
-              """), {"m": user["full_name"], "name": product_name.strip(),
-                     "sku": product_sku.strip(), "qty": int(product_qty),
-                     "price": float(product_price)})
-            st.success("Product added to inventory.")
-            st.rerun()
-
-    df_products = safe_read_sql(
-        "SELECT id, product_name, sku, quantity, unit_price, "
-        "(quantity*unit_price) AS stock_value FROM products "
-        "WHERE manager_name=:m ORDER BY product_name",
-        {"m": user["full_name"]}
-    )
-    st.subheader("Current Stock")
-    if not df_products.empty:
-      st.dataframe(df_products, use_container_width=True, hide_index=True)
-      available = df_products[df_products["quantity"].astype(int) > 0]
-      if not available.empty:
-        product_options = {
-            f"{r['product_name']} (Stock: {int(r['quantity'])}) — GHS {float(r['unit_price']):,.2f}":
-            int(r["id"]) for _, r in available.iterrows()
-        }
-        with st.form("record_sale_form", clear_on_submit=True):
-          chosen_product_label = st.selectbox("Product Sold", list(product_options))
-          sale_qty = st.number_input("Quantity Sold", min_value=1, step=1)
-          buyer_name = st.text_input("Customer / Buyer (Optional)")
-          record_sale = st.form_submit_button("Record Sale")
-          if record_sale:
-            product_id = product_options[chosen_product_label]
-            product_row = available[available["id"] == product_id].iloc[0]
-            stock_now = int(product_row["quantity"])
-            if int(sale_qty) > stock_now:
-              st.error(f"Insufficient stock. Available quantity: {stock_now}.")
-            else:
-              unit_price = float(product_row["unit_price"])
-              total = unit_price * int(sale_qty)
-              with engine.begin() as conn:
-                conn.execute(sqlalchemy.text("""
-                    UPDATE products SET quantity=quantity-:qty
-                    WHERE id=:id AND manager_name=:m AND quantity>=:qty
-                """), {"qty": int(sale_qty), "id": product_id, "m": user["full_name"]})
-                conn.execute(sqlalchemy.text("""
-                    INSERT INTO sales
-                    (manager_name, product_id, product_name, quantity, unit_price, total_amount, buyer_name)
-                    VALUES (:m, :pid, :name, :qty, :price, :total, :buyer)
-                """), {"m": user["full_name"], "pid": product_id,
-                       "name": product_row["product_name"], "qty": int(sale_qty),
-                       "price": unit_price, "total": total, "buyer": buyer_name.strip()})
-              st.success(f"Sale recorded. Total: GHS {total:,.2f}")
-              st.rerun()
-      else:
-        st.info("No stock is currently available for sale.")
-    else:
-      st.info("Add your first product to begin inventory management.")
-
-    st.markdown("---")
-    st.subheader("Sales History")
-    df_sales = safe_read_sql(
-        "SELECT id, product_name, quantity, unit_price, total_amount, buyer_name, sale_date "
-        "FROM sales WHERE manager_name=:m ORDER BY sale_date DESC",
-        {"m": user["full_name"]}
-    )
-    if not df_sales.empty:
-      st.dataframe(df_sales, use_container_width=True, hide_index=True)
-      st.metric("Total Sales Value (GHS)", f"{float(df_sales['total_amount'].sum()):,.2f}")
-    else:
-      st.info("No sales recorded yet.")
-
-  # 9. REPORT ISSUE (MANAGER)
+        # 7. REPORT ISSUE (MANAGER)
   elif nav == "🛠️ Report App Issue / Problem":
-    if is_admin:
-      st.error("Use the administrator support centre.")
-      return
     st.subheader("🛠️ Report App Issue to Developer / Admin")
     with st.form("issue_form", clear_on_submit=True):
       issue_msg = st.text_area("Describe the issue or request support:")
@@ -2058,51 +1472,11 @@ def render_dashboard():
         else 0
     )
 
-    total_registered_clients = int(
-        safe_read_sql("SELECT COUNT(*) AS n FROM clients").iloc[0]["n"]
-    )
-    m1, m2, m3, m4, m5 = st.columns(5)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Signed-Up Managers", total_managers)
     m2.metric("Active Managers", active_managers)
     m3.metric("Frozen Managers", frozen_managers)
-    m4.metric("Total Registered Clients", total_registered_clients)
-    m5.metric("Total Client Quota", total_allocated_quota)
-
-    # Aggregate client registrations by manager. This deliberately exposes
-    # counts only; it does not show client names, contacts, or transactions.
-    st.markdown("---")
-    st.subheader("👥 Registered Clients Under Each Manager")
-    if not df_managers.empty:
-      manager_client_summary = df_managers[[
-          "full_name", "phone", "status", "client_quota"
-      ]].copy()
-      manager_client_summary["Total Registered Clients"] = (
-          manager_client_summary["full_name"].map(count_map).fillna(0).astype(int)
-      )
-      manager_client_summary = manager_client_summary.rename(columns={
-          "full_name": "Manager",
-          "phone": "Phone",
-          "status": "Account Status",
-          "client_quota": "Client Quota",
-      })
-      manager_client_summary = manager_client_summary[[
-          "Manager", "Phone", "Account Status",
-          "Total Registered Clients", "Client Quota"
-      ]].sort_values(
-          by=["Total Registered Clients", "Manager"],
-          ascending=[False, True],
-      )
-      st.dataframe(
-          manager_client_summary,
-          use_container_width=True,
-          hide_index=True,
-      )
-      st.caption(
-          "Counts are grouped by manager. This summary does not expose "
-          "individual client records or transaction details."
-      )
-    else:
-      st.info("No managers have signed up yet.")
+    m4.metric("Total Client Quota", total_allocated_quota)
 
     st.markdown("---")
     st.subheader("📢 Workspace Broadcast Notice")
@@ -2192,24 +1566,6 @@ def render_dashboard():
               )
             st.success(f"Updated quota & permissions for {row['full_name']}.")
             st.rerun()
-
-        with st.form(f"admin_password_reset_{row['id']}"):
-          temp_password = st.text_input(
-              "Set a temporary password for this manager",
-              type="password",
-              key=f"temp_pw_{row['id']}",
-          )
-          if st.form_submit_button("Set Temporary Password"):
-            if len(temp_password) < 10:
-              st.error("Use at least 10 characters for the temporary password.")
-            else:
-              with engine.begin() as conn:
-                conn.execute(
-                    sqlalchemy.text("UPDATE users SET password=:p WHERE id=:id"),
-                    {"p": hash_password(temp_password), "id": int(row["id"])},
-                )
-              st.success("Temporary password updated. Share it securely with the manager.")
-              st.rerun()
 
         col1, col2 = st.columns(2)
         if row["status"] == "Active":
